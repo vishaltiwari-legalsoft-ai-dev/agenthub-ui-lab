@@ -15,6 +15,13 @@ import { DEFAULT_PLAN_LAYOUT } from "./wireframe";
 import { attachErrorMessage, canAttach, MAX_PROMPT_IMAGES } from "./promptAttach";
 import { BrandKitSheet } from "./BrandKitSheet";
 import {
+  STILL_GENERATING,
+  isStageStillRunning,
+  stageMark,
+  watchStageGenerate,
+  type GdStageResult,
+} from "./stageWatch";
+import {
   brandRefreshDue,
   brandSummaryOf,
   forgetBrand,
@@ -37,6 +44,7 @@ import {
   gdGenerate,
   gdBrands,
   gdGetConfig,
+  gdGetRun,
   gdPlan,
   gdStage4,
   gdSubjectUpload,
@@ -45,6 +53,7 @@ import {
   gdTextPreview,
   gdTweak,
   gdUpdateConfig,
+  isAbortError,
   type CreativeTypeMeta,
   type GdBrandLogoVariant,
   type GdBrandSummary,
@@ -246,7 +255,12 @@ export function GraphicsStudioV2({
   const [tweakPreview, setTweakPreview] = useState<GdAttempt | null>(null);
 
   const fail = useCallback(
-    (e: unknown) => onToast(e instanceof Error ? e.message : String(e), "error"),
+    (e: unknown) => {
+      // A stage watch the studio walked away from — nothing to say.
+      if (isAbortError(e)) return;
+      // A stage still running at the watch's cap is not a failure.
+      onToast(e instanceof Error ? e.message : String(e), isStageStillRunning(e) ? "warn" : "error");
+    },
     [onToast],
   );
 
@@ -263,6 +277,56 @@ export function GraphicsStudioV2({
     },
     [fail],
   );
+
+  /* A stage generate (1-3, and the Stage-4 composite) that outlives the
+     relay's 300 s cut is read back from the run until its NEW attempt is
+     there, instead of failing on the 504 — see stageWatch.ts. The overlay
+     says "Still generating…" meanwhile, and the guard's own label returns
+     once the attempt lands. */
+  const alive = useRef(true);
+  useEffect(() => {
+    alive.current = true;
+    return () => {
+      alive.current = false;
+    };
+  }, []);
+  const busyRef = useRef<string | null>(null);
+  busyRef.current = busy;
+  // A run whose last stage watch stopped at the cap: that attempt may have
+  // landed since, so the next mark is taken from a fresh read, or the late
+  // attempt would be taken for the new call's answer.
+  const unsettledRun = useRef<string | null>(null);
+  const generateStage = async (
+    runId: string,
+    stage: number,
+    fire: () => Promise<GdStageResult>,
+  ): Promise<GdStageResult> => {
+    let base = runRef.current;
+    if (unsettledRun.current === runId) {
+      base = await gdGetRun(runId);
+      setRun(base);
+      unsettledRun.current = null;
+    }
+    let label: string | null = null;
+    try {
+      const result = await watchStageGenerate({
+        stage,
+        mark: stageMark(base?.id === runId ? base : null, stage),
+        fire,
+        read: () => gdGetRun(runId),
+        current: () => alive.current && runRef.current?.id === runId,
+        onCut: () => {
+          label = busyRef.current;
+          setBusy(STILL_GENERATING);
+        },
+      });
+      if (label) setBusy(label);
+      return result;
+    } catch (e) {
+      if (isStageStillRunning(e)) unsettledRun.current = runId;
+      throw e;
+    }
+  };
 
   /* ---------------- data loads ---------------- */
   // Brands are shared and any member may add one. Each read is merged with
@@ -759,7 +823,9 @@ export function GraphicsStudioV2({
     if (cur <= 2 && !variant) return;
     if (cur === 4) {
       void guard("Compositing your real logo…", async () => {
-        const res = await gdStage4(run.id, null, run.config.use_ai_compositor ?? false, logoId);
+        const res = await generateStage(run.id, 4, () =>
+          gdStage4(run.id, null, run.config.use_ai_compositor ?? false, logoId),
+        );
         setRun(res.run);
         setExactPreview(true); // show the engine's composite
       });
@@ -769,7 +835,7 @@ export function GraphicsStudioV2({
       cur === 1 ? "Painting your brand background…" : cur === 2 ? "Creating your main image…" : "Placing your words, then polishing 3 styles…",
       async () => {
         if (cur === 3) await signAndPin();
-        const res = await gdGenerate(run.id, cur, variant ?? undefined);
+        const res = await generateStage(run.id, cur, () => gdGenerate(run.id, cur, variant ?? undefined));
         setRun(res.run);
         if (cur === 3) {
           // Text Optimizer set → show the 3-up gallery (brand_strict preselected).
@@ -809,13 +875,13 @@ export function GraphicsStudioV2({
       if (!r0) throw new Error("Run not available");
       if (stage === 1) {
         setSel1(p.gradient.cid);
-        await gdGenerate(r0.id, 1, p.gradient.cid);
+        await generateStage(r0.id, 1, () => gdGenerate(r0.id, 1, p.gradient.cid));
         setRun(await gdApprove(r0.id, 1));
       } else if (stage === 2) {
         setSel2(p.element.cid);
         // The wireframe's subject cell steers the Stage-2 prompt placement.
         if (p.layout) await gdUpdateConfig(r0.id, { element_placement: p.layout.subject_cell });
-        await gdGenerate(r0.id, 2, p.element.cid);
+        await generateStage(r0.id, 2, () => gdGenerate(r0.id, 2, p.element.cid));
         setRun(await gdApprove(r0.id, 2));
       } else if (stage === 3) {
         const sign = { approved: true, source: "user" as const };
@@ -845,7 +911,7 @@ export function GraphicsStudioV2({
         });
         setRun(r1);
         if (p.logo.logo_id) setLogoId(p.logo.logo_id);
-        const g = await gdGenerate(r0.id, 3);
+        const g = await generateStage(r0.id, 3, () => gdGenerate(r0.id, 3));
         setRun(g.run);
         if (g.attempts && g.attempts.length > 1) {
           // Text Optimizer styles ready → mandatory style gate: show the
@@ -906,7 +972,7 @@ export function GraphicsStudioV2({
         // deterministic path renders free; the optimizer path instead returns a
         // 3-style set the user must pick from).
         await signAndPin();
-        const g = await gdGenerate(run.id, 3);
+        const g = await generateStage(run.id, 3, () => gdGenerate(run.id, 3));
         setRun(g.run);
         if (g.attempts && g.attempts.length > 1) {
           setStyleSet(g.attempts);
@@ -921,7 +987,9 @@ export function GraphicsStudioV2({
       if (cur === 4) {
         // Same no-stale rule for the logo: composite the CURRENT placement,
         // then approve exactly that attempt.
-        const res = await gdStage4(run.id, null, run.config.use_ai_compositor ?? false, logoId);
+        const res = await generateStage(run.id, 4, () =>
+          gdStage4(run.id, null, run.config.use_ai_compositor ?? false, logoId),
+        );
         setRun(await gdApprove(run.id, 4, res.attempt.attempt));
         return;
       }

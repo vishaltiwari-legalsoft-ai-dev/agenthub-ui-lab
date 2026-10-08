@@ -17,7 +17,14 @@
  */
 
 import type { CreativeArtifact, CreativeRun } from "@/lib/api";
-import { isAbortError, isUnanswered } from "../../lib/requestPolicy";
+import {
+  STILL_GENERATING,
+  WATCH_BASE_MS,
+  WATCH_CAP_MS,
+  WATCH_MAX_MS,
+  nextDelay,
+  watchLongCall,
+} from "../../lib/longCall";
 
 /* ------------------------------------------------------------ provenance -- */
 
@@ -77,15 +84,11 @@ export function finishedNote(
 }
 
 /* ---------------------------------------------------------- the watch -- */
+/* The loop itself is `lib/longCall.ts`, shared with GD Studio's stage
+   generate; what lives here is what "finished" means for a creative run, and
+   the words. */
 
-/** First gap between reads, and the one a moving run returns to. */
-export const WATCH_BASE_MS = 2_000;
-/** The longest gap while nothing moves. */
-export const WATCH_MAX_MS = 15_000;
-/** How long one watch waits overall before it says so and stops. */
-export const WATCH_CAP_MS = 15 * 60_000;
-
-export const STILL_GENERATING = "Still generating — this one is taking longer than usual.";
+export { STILL_GENERATING, WATCH_BASE_MS, WATCH_CAP_MS, WATCH_MAX_MS, nextDelay };
 
 export function capMessage(capMs: number = WATCH_CAP_MS): string {
   const minutes = Math.round(capMs / 60_000);
@@ -129,37 +132,6 @@ export function runFingerprint(run: WatchedRun): string {
   ].join("|");
 }
 
-/** Back to the base gap when the run moved; ×1.5 up to the ceiling when not. */
-export function nextDelay(prevMs: number, moved: boolean): number {
-  if (moved) return WATCH_BASE_MS;
-  return Math.min(Math.round(prevMs * 1.5), WATCH_MAX_MS);
-}
-
-const statusOf = (e: unknown): number | null => {
-  const s = typeof e === "object" && e !== null ? (e as { status?: unknown }).status : undefined;
-  return typeof s === "number" ? s : null;
-};
-
-/** A rejected generate/autonomous call. Unanswered (relay 504, dropped
- *  connection, our own deadline) → keep watching the run; a caller's abort →
- *  say nothing; anything else is the backend's own answer — a real failure. */
-export function fireVerdict(e: unknown): "watch" | "silent" | "fatal" {
-  if (isAbortError(e)) return "silent";
-  return isUnanswered(e) ? "watch" : "fatal";
-}
-
-/** A rejected status read. A read is idempotent and cheap, so whatever may
- *  pass is waited out: no answer at all, a 5xx, a 429. A 4xx is the backend's
- *  answer (404 the run is gone), and so is a status-less rejection that is not
- *  a lost connection — the expired session. */
-export function readVerdict(e: unknown): "retry" | "silent" | "fatal" {
-  if (isAbortError(e)) return "silent";
-  if (isUnanswered(e)) return "retry";
-  const status = statusOf(e);
-  if (status !== null && (status >= 500 || status === 429)) return "retry";
-  return "fatal";
-}
-
 export type WatchOutcome<R> =
   /** Finished. `run` is the final copy. */
   | { kind: "done"; run: R }
@@ -186,75 +158,32 @@ export interface WatchDeps<R extends WatchedRun> {
   capMs?: number;
 }
 
-type Settled<R> = { ok: true; run: R } | { ok: false; error: unknown };
-
-/** Drive one long run to an outcome. Every effect is injected, so the stop
- *  rules — the part the old poller got wrong by quitting on the relay's 504 —
- *  are provable without React, a network or a real clock.
- *
- *  While the long call is still open its answer is the authority: reads only
- *  stream progress, so a stale `failed`/`DONE` left on the stored run by an
- *  earlier attempt can never end this one. Once the call comes back
- *  unanswered, the stored run is all there is, and its state decides. */
+/** Drive one creative run to an outcome: reads every 2 s while the call is
+ *  open so slides stream in, and after a cut until the stored run is DONE or
+ *  marked failed. */
 export async function watchRun<R extends WatchedRun>(deps: WatchDeps<R>): Promise<WatchOutcome<R>> {
-  const sleep = deps.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
-  const now = deps.now ?? Date.now;
-  const capMs = deps.capMs ?? WATCH_CAP_MS;
-  const startedAt = now();
-
-  const firing: Promise<Settled<R>> | null = deps.fire
-    ? deps.fire().then(
-        (run): Settled<R> => ({ ok: true, run }),
-        (error: unknown): Settled<R> => ({ ok: false, error }),
-      )
-    : null;
-  let open = firing !== null;
-  let delay = WATCH_BASE_MS;
-  let seen: string | null = null;
-
-  for (;;) {
-    // Wake early when the long call settles: its answer beats any read.
-    let answer: Settled<R> | null = null;
-    if (open && firing) answer = await Promise.race([sleep(delay).then(() => null), firing]);
-    else await sleep(delay);
-    if (!deps.current()) return { kind: "dropped" };
-
-    if (answer) {
-      open = false;
-      if (answer.ok) {
-        deps.onRun(answer.run);
-        return { kind: "done", run: answer.run };
-      }
-      const verdict = fireVerdict(answer.error);
-      if (verdict === "silent") return { kind: "dropped" };
-      if (verdict === "fatal") return { kind: "failed", error: answer.error };
-      deps.onCut?.();
-      delay = WATCH_BASE_MS;
-      // Straight on to a read: the run may well have finished meanwhile.
-    }
-
-    try {
-      const run = await deps.read();
-      if (!deps.current()) return { kind: "dropped" };
-      deps.onRun(run);
-      if (!open) {
-        const phase = runPhase(run);
-        if (phase === "done") return { kind: "done", run };
-        if (phase === "failed") return { kind: "failed", error: new Error(runFailureMessage(run)) };
-      }
-      const mark = runFingerprint(run);
-      // While the call is open, the steady base cadence streams slides in as
-      // they land (as the poller always did); backoff is for the long tail.
-      delay = open ? WATCH_BASE_MS : nextDelay(delay, seen !== null && mark !== seen);
-      seen = mark;
-    } catch (e) {
-      if (!deps.current()) return { kind: "dropped" };
-      const verdict = readVerdict(e);
-      if (verdict === "silent") return { kind: "dropped" };
-      if (verdict === "fatal") return { kind: "failed", error: e };
-      delay = open ? WATCH_BASE_MS : nextDelay(delay, false);
-    }
-
-    if (now() - startedAt >= capMs) return { kind: "capped", message: capMessage(capMs) };
+  const out = await watchLongCall<R, R>({
+    fire: deps.fire,
+    read: deps.read,
+    current: deps.current,
+    onRead: deps.onRun,
+    onCut: deps.onCut,
+    readWhileOpen: true,
+    sleep: deps.sleep,
+    now: deps.now,
+    capMs: deps.capMs,
+    settle: (run) => {
+      const phase = runPhase(run);
+      if (phase === "done") return { kind: "done", value: run };
+      if (phase === "failed") return { kind: "failed", error: new Error(runFailureMessage(run)) };
+      return null;
+    },
+    fingerprint: runFingerprint,
+  });
+  if (out.kind === "done") {
+    deps.onRun(out.value);
+    return { kind: "done", run: out.value };
   }
+  if (out.kind === "capped") return { kind: "capped", message: capMessage(out.capMs) };
+  return out;
 }

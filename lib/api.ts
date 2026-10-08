@@ -1419,6 +1419,10 @@ export type GdPlacementSuggestion = {
 export const gdSuggestPlacement = (id: string) =>
   postJson<GdPlacementSuggestion>(`/api/gd/runs/${id}/suggest-placement`, {});
 
+/** The run as stored — any instance can answer. Read back by the stage watch
+ *  (`gd2/stageWatch.ts`) after the relay cuts a long stage generate. */
+export const gdGetRun = (id: string) => getJson<GdRun>(`/api/gd/runs/${id}`);
+
 export const gdApprove = (id: string, stage: number, attempt?: number) =>
   postJson<GdRun>(`/api/gd/runs/${id}/approve`, { stage, attempt });
 
