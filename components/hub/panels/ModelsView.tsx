@@ -34,6 +34,8 @@ const SLOT_JOB: Record<AgentModelField, string> = {
     "Bulk work — fetching, normalising, summarising before the long model reads. Thousands of calls, so cost matters more than depth here.",
   openrouter_image_model:
     "Draws the picture. This is the one that decides how the work looks.",
+  gd_gradient_image_model:
+    "Paints the brand gradient behind each design in Stage 1 — chosen for how faithfully it holds the brand's colours.",
   openrouter_vision_model:
     "Looks at the finished file and checks it against the brief before you see it.",
   gd_planner_model:
@@ -46,6 +48,7 @@ const SLOT_LABEL: Record<AgentModelField, string> = {
   openrouter_model: "Reasoning",
   openrouter_fast_model: "Fast",
   openrouter_image_model: "Image",
+  gd_gradient_image_model: "Gradient (Stage 1)",
   openrouter_vision_model: "Vision",
   gd_planner_model: "Planner",
   gd_polish_image_model: "Polish",

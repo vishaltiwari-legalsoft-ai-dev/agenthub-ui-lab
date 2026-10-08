@@ -20,6 +20,7 @@ import { useAuth } from "@/lib/auth";
 /** Friendly labels + display order for the per-agent model fields. */
 const FIELD_LABEL: Record<AgentModelField, string> = {
   openrouter_image_model: "Image model",
+  gd_gradient_image_model: "Gradient image model (Stage 1)",
   gd_polish_image_model: "Polish model",
   openrouter_model: "Reasoning model",
   openrouter_fast_model: "Fast / parsing model",
@@ -29,14 +30,20 @@ const FIELD_LABEL: Record<AgentModelField, string> = {
 /** A field missing from this list is filtered out below and never renders,
  *  however happily the backend serves it. Add new AgentModelField values here
  *  as well as to the union. */
-const FIELD_ORDER: AgentModelField[] = [
+const FIELD_ORDER = [
   "openrouter_image_model",
+  "gd_gradient_image_model",
   "gd_polish_image_model",
   "openrouter_model",
   "openrouter_fast_model",
   "openrouter_vision_model",
   "gd_planner_model",
-];
+] as const satisfies readonly AgentModelField[];
+/** Compile-time guard for the comment above: a field added to the union but
+ *  not to FIELD_ORDER fails `tsc` here instead of silently never rendering. */
+type UnorderedField = Exclude<AgentModelField, (typeof FIELD_ORDER)[number]>;
+const _everyFieldOrdered: [UnorderedField] extends [never] ? true : UnorderedField = true;
+void _everyFieldOrdered;
 /** Per-agent label overrides where the generic field name would mislead. */
 const AGENT_FIELD_LABEL: Record<string, Partial<Record<AgentModelField, string>>> = {};
 

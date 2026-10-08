@@ -457,23 +457,23 @@ const STATIC: Record<string, Fix> = {
       openrouter: { api_key_set: true, api_key_hint: "sk-or-…9f2a", api_key_source: "override", model: "claude-sonnet-5-5", fast_model: "claude-haiku-4-5", image_model: "gemini-2.5-flash-image", vision_model: "claude-sonnet-5-5" },
       sources: { openrouter_api_key: "override" },
       keys: { openrouter: { set: true, hint: "sk-or-…9f2a", source: "override" }, perplexity: { set: true, hint: "pplx-…11c0", source: "env" }, gemini: { set: true, hint: "AIza…77d1", source: "env" }, openai: { set: false, hint: "", source: "unset" } },
-      catalog: { openrouter_model: cat, openrouter_fast_model: cat, openrouter_image_model: cat, openrouter_vision_model: cat, gd_planner_model: cat, gd_polish_image_model: cat },
+      catalog: { openrouter_model: cat, openrouter_fast_model: cat, openrouter_image_model: cat, openrouter_vision_model: cat, gd_planner_model: cat, gd_polish_image_model: cat, gd_gradient_image_model: cat },
     };
   },
   "/api/admin/agents": (): AgentConfigResponse => {
     const cat = [{ id: "claude-sonnet-5-5", name: "Claude Sonnet", provider: "anthropic", recommended: true, tier: "balanced" }, { id: "claude-opus-5-5", name: "Claude Opus", provider: "anthropic", tier: "flagship" }, { id: "claude-haiku-4-5", name: "Claude Haiku", provider: "anthropic", tier: "fast" }];
-    const fields = ["openrouter_model", "openrouter_fast_model", "openrouter_image_model", "openrouter_vision_model", "gd_planner_model", "gd_polish_image_model"] as const;
+    const fields = ["openrouter_model", "openrouter_fast_model", "openrouter_image_model", "openrouter_vision_model", "gd_planner_model", "gd_polish_image_model", "gd_gradient_image_model"] as const;
     return {
       agents: [
-        { id: "a1", name: "Graphic Designer", role: "Brand & visual assets", category: "creative", live: true, fields: ["openrouter_model", "openrouter_image_model", "gd_planner_model", "gd_polish_image_model"], overrides: {}, effective: { openrouter_model: "claude-sonnet-5-5", openrouter_image_model: "gemini-2.5-flash-image" } },
+        { id: "a1", name: "Graphic Designer", role: "Brand & visual assets", category: "creative", live: true, fields: ["openrouter_model", "openrouter_image_model", "gd_planner_model", "gd_polish_image_model", "gd_gradient_image_model"], overrides: {}, effective: { openrouter_model: "claude-sonnet-5-5", openrouter_image_model: "gemini-2.5-flash-image" } },
         { id: "a2", name: "SEO Analyst", role: "Search & rankings", category: "search", live: true, fields: ["openrouter_model", "openrouter_fast_model"], overrides: {}, effective: { openrouter_model: "claude-sonnet-5-5" } },
         { id: "a6", name: "Marketing Research", role: "Campaigns & funnel", category: "research", live: true, fields: ["openrouter_model"], overrides: {}, effective: { openrouter_model: "claude-sonnet-5-5" } },
         { id: "a9", name: "Blog Writer", role: "Deep-research drafts", category: "content", live: true, fields: ["openrouter_model"], overrides: { openrouter_model: "claude-opus-5-5" }, effective: { openrouter_model: "claude-opus-5-5" } },
       ],
       fields: [...fields],
-      catalog: { openrouter_model: cat, openrouter_fast_model: cat, openrouter_image_model: cat, openrouter_vision_model: cat, gd_planner_model: cat, gd_polish_image_model: cat },
+      catalog: { openrouter_model: cat, openrouter_fast_model: cat, openrouter_image_model: cat, openrouter_vision_model: cat, gd_planner_model: cat, gd_polish_image_model: cat, gd_gradient_image_model: cat },
       tier_labels: { flagship: "Flagship", balanced: "Balanced", fast: "Fast" },
-      global_defaults: { openrouter_model: "claude-sonnet-5-5", openrouter_fast_model: "claude-haiku-4-5", openrouter_image_model: "gemini-2.5-flash-image", openrouter_vision_model: "claude-sonnet-5-5", gd_planner_model: "claude-sonnet-5-5", gd_polish_image_model: "gemini-2.5-flash-image" },
+      global_defaults: { openrouter_model: "claude-sonnet-5-5", openrouter_fast_model: "claude-haiku-4-5", openrouter_image_model: "gemini-2.5-flash-image", openrouter_vision_model: "claude-sonnet-5-5", gd_planner_model: "claude-sonnet-5-5", gd_polish_image_model: "gemini-2.5-flash-image", gd_gradient_image_model: "google/gemini-3-pro-image" },
     };
   },
   "/api/admin/db/collections": (): DbCollectionsResponse => ({

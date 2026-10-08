@@ -665,7 +665,11 @@ export type AgentModelField =
   | "openrouter_image_model"
   | "openrouter_vision_model"
   | "gd_planner_model"
-  | "gd_polish_image_model";
+  | "gd_polish_image_model"
+  /** GD Stage 1 (brand gradient) runs its own image model, picked for colour
+   *  fidelity. Per-agent only, like the polish model: `POST /api/admin/settings`
+   *  does not take it, so it has no place on the Secrets panel. */
+  | "gd_gradient_image_model";
 
 export interface AgentConfigItem {
   id: string;
@@ -1580,6 +1584,14 @@ export interface CreativeArtifact {
   ref: string;
   bytes: number;
   url: string;
+  /** Provenance, the same pair GD Stage-3 attempts carry. `true`: every image
+   *  in the file came from the image model. `false`: at least one is a locally
+   *  drawn brand-gradient stand-in, and `fallback_reason` says which, in one
+   *  plain sentence. Absent: no image model was involved (the PPTX deck) — or
+   *  a backend older than the field — so there is nothing to disclose. The
+   *  bundled .zip carries its least AI-made member's provenance. */
+  ai?: boolean;
+  fallback_reason?: string | null;
 }
 
 export interface CreativePlan {

@@ -10,6 +10,9 @@
  */
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
+  apiStatus,
+  creativeGenerate,
+  creativeGet,
   gdArtifactBlob,
   getDbCollections,
   isAbortError,
@@ -21,7 +24,7 @@ import {
   seoSetCompetitors,
   setUnauthorizedHandler,
 } from "./api";
-import { DEFAULT_TIMEOUT_MS, SLOW_TIMEOUT_MS } from "./requestPolicy";
+import { DEFAULT_TIMEOUT_MS, isUnanswered, SLOW_TIMEOUT_MS } from "./requestPolicy";
 
 /** A server that accepts the connection and then never answers. */
 function stubHangingFetch() {
@@ -196,6 +199,47 @@ describe("responses that do arrive", () => {
 
     await expect(getDbCollections()).rejects.toThrow(/sign in again/);
     expect(onUnauthorized).toHaveBeenCalledTimes(1);
+  });
+});
+
+/* The Vercel relay is cut at its 300 s maxDuration while Cloud Run carries on;
+ * the browser then gets the platform's own 504 page, not a FastAPI detail.
+ * These pin that the real client hands the creative watch a rejection it can
+ * recognise as "go and look", and the backend's own refusals as answers. */
+describe("a long creative call that comes back unanswered", () => {
+  it("rejects the relay's non-JSON 504 as unanswered, with the status kept", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => new Response("An error occurred with your deployment. FUNCTION_INVOCATION_TIMEOUT", { status: 504 })),
+    );
+    const err = await creativeGenerate("run_1").catch((e: unknown) => e);
+    expect(apiStatus(err)).toBe(504);
+    expect(isUnanswered(err)).toBe(true);
+  });
+
+  it("rejects a dropped connection as unanswered", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => { throw new TypeError("Failed to fetch"); }));
+    const err = await creativeGenerate("run_1").catch((e: unknown) => e);
+    expect(isUnanswered(err)).toBe(true);
+  });
+
+  it("keeps the backend's 503 an answer, in its own words", async () => {
+    stubErrorReply(503, "The creative was generated but its files could not be saved — file storage is unavailable. Please try again.");
+    const err = await creativeGenerate("run_1").catch((e: unknown) => e);
+    expect(isUnanswered(err)).toBe(false);
+    expect((err as Error).message).toContain("file storage is unavailable");
+  });
+
+  it("passes each artifact's provenance through untouched", async () => {
+    const artifacts = [
+      { name: "slide-1.png", mime: "image/png", ref: "r1", bytes: 10, url: "/u1", ai: true, fallback_reason: null },
+      { name: "slide-3.png", mime: "image/png", ref: "r3", bytes: 10, url: "/u3", ai: false, fallback_reason: "The image model returned no picture for slide 3." },
+      { name: "deck.pptx", mime: "application/vnd.openxmlformats-officedocument.presentationml.presentation", ref: "d", bytes: 10, url: "/d" },
+    ];
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({ id: "run_1", state: "DONE", artifacts }), { status: 200 })));
+    const run = await creativeGet("run_1");
+    expect(run.artifacts[1]).toMatchObject({ ai: false, fallback_reason: "The image model returned no picture for slide 3." });
+    expect(run.artifacts[2].ai).toBeUndefined();
   });
 });
 

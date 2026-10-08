@@ -20,11 +20,21 @@ import {
   type CreativeStep,
   type CreativeTypeMeta,
 } from "@/lib/api";
-
-const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 import { Button, Icon } from "@/lib/kit-ui";
 import { useLoadSession } from "@/lib/load";
 import { useReportWork } from "@/lib/work";
+import {
+  STAND_IN_SHORT,
+  STILL_GENERATING,
+  finishedNote,
+  standIn,
+  watchRun,
+} from "./creativeRun";
+
+/** Shown under the output while a run outlives its request: "slow" once the
+ *  relay cut the call and the run is being read back by id; "capped" once the
+ *  watch gave up waiting, with its own sentence and a way to look again. */
+type WaitNote = { kind: "slow" } | { kind: "capped"; message: string };
 
 /* --------------------------------------------------------------------------
    Creative Agent — the dedicated rail for brochures, decks, carousels & blog
@@ -81,6 +91,7 @@ export function CreativeAgent({
   );
   const [busy, setBusy] = useState(false);
   const [generating, setGenerating] = useState(false);
+  const [waitNote, setWaitNote] = useState<WaitNote | null>(null);
   useReportWork(busy || generating);
   const [showWarning, setShowWarning] = useState(false);
   const [showLog, setShowLog] = useState(true);
@@ -101,37 +112,39 @@ export function CreativeAgent({
       });
   }, [onToast, session]);
 
-  // Drive a long generation (manual generate OR autonomous) while polling the run
+  // Drive a long generation (manual generate OR autonomous) while reading the run
   // so slides appear as they finish instead of after one long blocking spinner.
+  // The relay cuts the request at 300 s while the backend carries on, so a cut
+  // (504 / dropped connection / our deadline) keeps the watch reading the run by
+  // id until it is DONE or failed, or the cap passes — see creativeRun.ts.
+  // `fire: null` only watches: "Check again" after the cap, which bills nothing.
   const runWithProgress = useCallback(
-    async (runId: string, fire: () => Promise<CreativeRun>, doneToast: string) => {
+    async (runId: string, fire: (() => Promise<CreativeRun>) | null, doneToast: string) => {
       const attempt = session.begin("generate");
       setGenerating(true);
-      let active = true;
-      const poll = async () => {
-        while (active) {
-          await sleep(2000);
-          try {
-            const r = await creativeGet(runId);
-            if (attempt.current()) setRun(r);
-            if (r.state === "DONE") active = false;
-          } catch {
-            /* transient — keep polling */
-          }
-        }
-      };
-      const polling = poll();
+      setWaitNote(fire ? null : { kind: "slow" });
       try {
-        const final = await fire();
+        const outcome = await watchRun<CreativeRun>({
+          fire: fire ?? undefined,
+          read: () => creativeGet(runId),
+          current: () => attempt.current(),
+          onRun: setRun,
+          onCut: () => setWaitNote({ kind: "slow" }),
+        });
         if (!attempt.current()) return;
-        setRun(final);
-        onToast(doneToast);
-      } catch (e) {
-        const message = attempt.failure(e, "The run failed");
-        if (message) onToast(message, "error");
+        if (outcome.kind === "done") {
+          setWaitNote(null);
+          const note = finishedNote(doneToast, outcome.run.artifacts);
+          onToast(note.message, note.tone);
+        } else if (outcome.kind === "failed") {
+          setWaitNote(null);
+          const message = attempt.failure(outcome.error, "The run failed");
+          if (message) onToast(message, "error");
+        } else if (outcome.kind === "capped") {
+          setWaitNote({ kind: "capped", message: outcome.message });
+          onToast(outcome.message, "warn");
+        }
       } finally {
-        active = false;
-        await polling;
         if (attempt.current()) setGenerating(false);
       }
     },
@@ -233,6 +246,10 @@ export function CreativeAgent({
     if (a) await runWithProgress(a.id, () => creativeGenerate(a.id), "Creative generated");
   };
   const takeControl = () => run && wrap(() => creativeOverride(run.id), "You now have manual control");
+  // After the cap: read the same run again — no new generation, nothing billed.
+  const checkAgain = () =>
+    run &&
+    runWithProgress(run.id, null, run.autonomous ? "Autonomous run complete" : "Creative generated");
 
   const download = async (art: CreativeArtifact) => {
     try {
@@ -484,7 +501,7 @@ export function CreativeAgent({
           )}
 
           {/* Output — progress while generating, live thumbnails as frames land */}
-          {(generating || run.artifacts.length > 0) && (
+          {(generating || waitNote || run.artifacts.length > 0) && (
             <div className="crea-card">
               <h3 className="crea-card__h">
                 {generating ? (
@@ -492,12 +509,36 @@ export function CreativeAgent({
                     <Icon name="loader-circle" size={14} /> Generating
                     {run.progress ? ` — ${run.progress.done}/${run.progress.total}` : "…"}
                   </>
+                ) : waitNote?.kind === "capped" ? (
+                  <>
+                    <Icon name="clock" size={14} /> Not finished yet
+                    {run.progress ? ` — ${run.progress.done}/${run.progress.total}` : ""}
+                  </>
                 ) : (
                   <>
                     <Icon name="check" size={14} /> Output ({run.artifacts.length})
                   </>
                 )}
               </h3>
+
+              {waitNote && (
+                <div
+                  className={
+                    "crea-banner " + (waitNote.kind === "capped" ? "crea-banner--wait" : "crea-banner--info")
+                  }
+                  role="status"
+                >
+                  <Icon name="clock" size={14} />
+                  <span className="crea-banner__text">
+                    {waitNote.kind === "capped" ? waitNote.message : STILL_GENERATING}
+                  </span>
+                  {waitNote.kind === "capped" && !generating && (
+                    <button type="button" className="gdminibtn crea-banner__act" onClick={checkAgain}>
+                      <Icon name="refresh-cw" size={13} /> Check again
+                    </button>
+                  )}
+                </div>
+              )}
 
               {generating && run.progress && run.progress.total > 0 && (
                 <div className="crea-progress" aria-label="generation progress">
@@ -514,17 +555,23 @@ export function CreativeAgent({
                   {[...run.artifacts]
                     .filter((a) => a.mime.startsWith("image/"))
                     .sort((a, b) => a.name.localeCompare(b.name))
-                    .map((a) => (
-                      <button
-                        key={a.name}
-                        className="crea-thumb"
-                        onClick={() => download(a)}
-                        title={`Download ${a.name}`}
-                      >
-                        <ArtifactThumb art={a} />
-                        <span className="crea-thumb__cap">{a.name}</span>
-                      </button>
-                    ))}
+                    .map((a) => {
+                      const note = standIn(a);
+                      return (
+                        <button
+                          key={a.name}
+                          className="crea-thumb"
+                          onClick={() => download(a)}
+                          title={
+                            note ? `Download ${a.name} — ${note.label}: ${note.detail}` : `Download ${a.name}`
+                          }
+                        >
+                          <ArtifactThumb art={a} />
+                          {note && <span className="crea-thumb__flag">{STAND_IN_SHORT}</span>}
+                          <span className="crea-thumb__cap">{a.name}</span>
+                        </button>
+                      );
+                    })}
                   {generating &&
                     run.progress &&
                     Array.from({
@@ -543,13 +590,7 @@ export function CreativeAgent({
                   {[...run.artifacts]
                     .sort((a, b) => a.name.localeCompare(b.name))
                     .map((a) => (
-                      <li key={a.name} className="crea-file">
-                        <span className="crea-file__name">{a.name}</span>
-                        <span className="crea-file__meta">{fmtBytes(a.bytes)}</span>
-                        <button className="gdminibtn" onClick={() => download(a)}>
-                          <Icon name="download" size={14} /> Download
-                        </button>
-                      </li>
+                      <ArtifactFileRow key={a.name} art={a} onDownload={download} />
                     ))}
                 </ul>
               )}
@@ -611,6 +652,50 @@ function ArtifactThumb({ art }: { art: CreativeArtifact }) {
     <span className="crea-thumb__loading">
       <Icon name="loader-circle" size={16} />
     </span>
+  );
+}
+
+/* ---------------------------- Download row ------------------------------ */
+/* One produced file. A file the image model did not fully make carries a calm
+   amber "Includes a stand-in image (not AI)" badge; the backend's reason shows
+   on hover and, for keyboard and touch, expands under the row on press. */
+function ArtifactFileRow({
+  art,
+  onDownload,
+}: {
+  art: CreativeArtifact;
+  onDownload: (art: CreativeArtifact) => void;
+}) {
+  const note = standIn(art);
+  const [open, setOpen] = useState(false);
+  const whyId = `crea-why-${art.name.replace(/[^a-zA-Z0-9_-]/g, "-")}`;
+  return (
+    <li className="crea-file">
+      <div className="crea-file__row">
+        <span className="crea-file__name">{art.name}</span>
+        {note && (
+          <button
+            type="button"
+            className="crea-standin"
+            title={note.detail}
+            aria-expanded={open}
+            aria-controls={whyId}
+            onClick={() => setOpen((v) => !v)}
+          >
+            <Icon name="image" size={12} /> {note.label}
+          </button>
+        )}
+        <span className="crea-file__meta">{fmtBytes(art.bytes)}</span>
+        <button className="gdminibtn" onClick={() => onDownload(art)}>
+          <Icon name="download" size={14} /> Download
+        </button>
+      </div>
+      {note && (
+        <p id={whyId} className="crea-standin__why" hidden={!open}>
+          {note.detail}
+        </p>
+      )}
+    </li>
   );
 }
 

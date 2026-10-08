@@ -141,6 +141,12 @@
   padding: 9px 11px; border-radius: var(--radius-md); text-align: left;
 }
 .crea-banner--warn { background: var(--cat-copy-bg); color: var(--cat-copy); border: 1px solid color-mix(in srgb, var(--cat-copy) 25%, transparent); }
+/* A run outliving its request: neutral while it is still being read back,
+   amber once the watch stops waiting. Neither is an alarm, so neither is red. */
+.crea-banner--info { background: var(--surface-sunken, var(--surface)); color: var(--text-secondary); border: 1px solid var(--border); margin-bottom: 12px; }
+.crea-banner--wait { background: var(--warning-bg); color: var(--amber-600); border: 1px solid color-mix(in srgb, var(--warning) 30%, transparent); margin-bottom: 12px; flex-wrap: wrap; }
+.crea-banner__text { flex: 1; min-width: 0; }
+.crea-banner__act { display: inline-flex; align-items: center; gap: 4px; }
 
 /* Workspace */
 .crea-wrap { display: flex; flex-direction: column; gap: 14px; padding: 18px 22px; overflow: auto; }
@@ -205,7 +211,10 @@
 
 /* Live slide thumbnails */
 .crea-thumbs { display: grid; grid-template-columns: repeat(auto-fill, minmax(116px, 1fr)); gap: 10px; margin-bottom: 14px; }
-.crea-thumb { display: flex; flex-direction: column; gap: 5px; padding: 0; background: none; border: 1px solid var(--border); border-radius: var(--radius-md); overflow: hidden; cursor: pointer; transition: border-color 0.15s ease, transform 0.15s ease; }
+.crea-thumb { position: relative; display: flex; flex-direction: column; gap: 5px; padding: 0; background: none; border: 1px solid var(--border); border-radius: var(--radius-md); overflow: hidden; cursor: pointer; transition: border-color 0.15s ease, transform 0.15s ease; }
+.crea-thumb:focus-visible { outline: none; box-shadow: var(--ring); border-color: var(--brand); }
+/* A slide the image model did not make — said on the picture itself. */
+.crea-thumb__flag { position: absolute; top: 6px; left: 6px; font-size: 9.5px; font-weight: 700; line-height: 1; padding: 3px 6px; border-radius: var(--radius-pill); background: var(--surface); color: var(--amber-600); border: 1px solid color-mix(in srgb, var(--warning) 45%, transparent); }
 .crea-thumb:hover { border-color: var(--brand); transform: translateY(-1px); }
 .crea-thumb__img { display: block; width: 100%; aspect-ratio: 1 / 1; object-fit: cover; background: var(--surface-sunken, var(--surface)); }
 .crea-thumb__cap { font-size: 10.5px; color: var(--text-tertiary); padding: 0 6px 6px; text-align: center; }
@@ -217,10 +226,17 @@
 
 /* Output files */
 .crea-files { list-style: none; padding: 0; margin: 0; display: flex; flex-direction: column; gap: 8px; }
-.crea-file { display: flex; align-items: center; gap: 10px; padding: 8px 10px; border-radius: var(--radius-md); border: 1px solid var(--border); }
-.crea-file__name { font-size: 12.5px; font-weight: 600; color: var(--text-primary); flex: 1; }
+.crea-file { display: flex; flex-direction: column; gap: 6px; padding: 8px 10px; border-radius: var(--radius-md); border: 1px solid var(--border); }
+.crea-file__row { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; }
+.crea-file__name { font-size: 12.5px; font-weight: 600; color: var(--text-primary); flex: 1; min-width: 0; overflow-wrap: anywhere; }
 .crea-file__meta { font-size: 11px; color: var(--text-tertiary); }
 .crea-file .gdminibtn { display: inline-flex; align-items: center; gap: 4px; }
+/* Stand-in disclosure: the warning tokens, never the danger ones — a stand-in
+   is a fact to know before sending the file on, not an error. */
+.crea-standin { display: inline-flex; align-items: center; gap: 4px; font-family: var(--font-sans); font-size: 11px; font-weight: 600; line-height: 1; padding: 4px 8px; border-radius: var(--radius-pill); background: var(--warning-bg); color: var(--amber-600); border: 1px solid color-mix(in srgb, var(--warning) 30%, transparent); cursor: pointer; }
+.crea-standin:hover { border-color: var(--warning); }
+.crea-standin:focus-visible { outline: none; box-shadow: var(--ring); }
+.crea-standin__why { margin: 0; font-size: 11.5px; line-height: 1.45; color: var(--text-secondary); padding-left: 2px; }
 
 /* Decision log */
 .crea-side { border: 1px solid var(--border); border-radius: var(--radius-lg); background: var(--surface); padding: 12px 14px; position: sticky; top: 12px; }

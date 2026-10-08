@@ -5,6 +5,7 @@ import {
   humanDuration,
   isAbortError,
   isTimeoutError,
+  isUnanswered,
   DEFAULT_TIMEOUT_MS,
   NO_TIMEOUT,
   RequestSequence,
@@ -85,6 +86,27 @@ describe("error classification", () => {
   it("says how long it waited, in the message the user sees", () => {
     expect(new RequestTimeoutError(SLOW_TIMEOUT_MS).message).toContain("10 minutes");
     expect(new RequestTimeoutError(DEFAULT_TIMEOUT_MS).message).toContain("cancelled");
+  });
+
+  /* A long POST the relay cut at 300 s is still running on Cloud Run; the
+     creative watch reads the run back by id instead of calling it failed. */
+  it("counts the relay's 504, a dropped connection and our deadline as unanswered", () => {
+    const relayCut = Object.assign(new Error("Request failed (504)"), { status: 504 });
+    expect(isUnanswered(relayCut)).toBe(true);
+    expect(isUnanswered(new TypeError("Failed to fetch"))).toBe(true);
+    expect(isUnanswered(new TypeError("Load failed"))).toBe(true);
+    expect(isUnanswered(new RequestTimeoutError(SLOW_TIMEOUT_MS))).toBe(true);
+  });
+
+  it("never mistakes the backend's own answer, or a cancellation, for a lost one", () => {
+    // 503 is "engine missing" / "file storage unavailable" — said by the backend.
+    expect(isUnanswered(Object.assign(new Error("storage down"), { status: 503 }))).toBe(false);
+    expect(isUnanswered(Object.assign(new Error("Plan must be approved"), { status: 400 }))).toBe(false);
+    expect(isUnanswered(Object.assign(new Error("Run not found"), { status: 404 }))).toBe(false);
+    expect(isUnanswered(Object.assign(new Error("aborted"), { name: "AbortError" }))).toBe(false);
+    expect(isUnanswered(new Error("Your session expired — please sign in again."))).toBe(false);
+    expect(isUnanswered(null)).toBe(false);
+    expect(isUnanswered("504")).toBe(false);
   });
 });
 

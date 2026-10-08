@@ -153,6 +153,28 @@ export function isAbortError(e: unknown): boolean {
   return (e as { name?: unknown }).name === "AbortError";
 }
 
+/** True when a call ended without the backend's answer, so the work it asked
+ *  for may well still be running there. Exactly three shapes:
+ *
+ *  - **a 504** — the Vercel relay (`app/backend/[...path]/route.ts`) is cut at
+ *    its 300 s `maxDuration` while Cloud Run carries on with the request. Read
+ *    structurally off `status`, the way `isAbortError` reads `name`, because
+ *    `ApiError` lives in `api.ts`, which imports this module.
+ *  - **a dropped connection** — `fetch` rejects with a `TypeError` ("Failed to
+ *    fetch" / "Load failed" / "NetworkError…", by browser).
+ *  - **our own deadline** — `RequestTimeoutError`, whose message already says
+ *    the job may still be finishing.
+ *
+ *  Never a caller's abort (a supersession, not a lost answer) and never any
+ *  other status: a 503 or a 400 IS the backend's answer. For work that can be
+ *  read back by id afterwards, this means "go and look", not "it failed". */
+export function isUnanswered(e: unknown): boolean {
+  if (isTimeoutError(e)) return true;
+  if (isAbortError(e)) return false;
+  if (e instanceof TypeError) return true;
+  return typeof e === "object" && e !== null && (e as { status?: unknown }).status === 504;
+}
+
 export interface Deadline {
   /** Signal to hand to `fetch`. `undefined` when nothing can cancel this call. */
   readonly signal: AbortSignal | undefined;
