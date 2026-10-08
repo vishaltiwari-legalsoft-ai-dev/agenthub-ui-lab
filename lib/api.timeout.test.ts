@@ -8,7 +8,10 @@
  *  `fetch` is stubbed with a promise that only settles when its signal aborts,
  *  which is exactly how the browser behaves against a wedged server.
  */
-import { afterEach, describe, expect, it, vi } from "vitest";
+import http from "node:http";
+import type { AddressInfo } from "node:net";
+import type { NextRequest } from "next/server";
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import {
   apiStatus,
   creativeGenerate,
@@ -25,6 +28,17 @@ import {
   setUnauthorizedHandler,
 } from "./api";
 import { DEFAULT_TIMEOUT_MS, isUnanswered, SLOW_TIMEOUT_MS } from "./requestPolicy";
+import { downstreamHeaders, upstreamHeaders } from "./relay";
+
+// The relay's one outside call — minting the Cloud Run identity token — is the
+// only thing faked below; the route, Node's fetch and the server are real.
+vi.mock("google-auth-library", () => ({
+  GoogleAuth: class {
+    async getIdTokenClient() {
+      return { idTokenProvider: { fetchIdToken: async () => "test-identity-token" } };
+    }
+  },
+}));
 
 /** A server that accepts the connection and then never answers. */
 function stubHangingFetch() {
@@ -384,5 +398,161 @@ describe("preview mode is off unless a build asks for it", () => {
     await listRuns({ limit: 1 });
     expect(fetchMock).toHaveBeenCalledTimes(1);
     expect(String(fetchMock.mock.calls[0]?.[0])).toContain("/api/runs");
+  });
+});
+
+/* ------------------------------------------------- the relay, end to end -- */
+
+/** The other half of this transport: `app/backend/[...path]/route.ts`, the
+ *  same-origin relay every production call goes through. Until 2026-10-09 any
+ *  body over 1 MiB from curl got an EMPTY 500 and never reached Cloud Run —
+ *  curl's `Expect: 100-continue` was copied onto the upstream fetch, which
+ *  undici refuses. These run the real route module against a real local
+ *  server with real multipart bodies at the sizes the probe failed on. */
+describe("the relay passes large request bodies through intact", () => {
+  type Seen = { url: string; headers: http.IncomingHttpHeaders; body: Buffer };
+  const seen: Seen[] = [];
+  let server: http.Server;
+  let route: typeof import("../app/backend/[...path]/route");
+
+  beforeAll(async () => {
+    server = http.createServer((req, res) => {
+      if (req.url?.startsWith("/api/drop")) {
+        req.socket.destroy(); // Cloud Run gone mid-request
+        return;
+      }
+      if (req.url?.startsWith("/api/expired")) {
+        // FastAPI refusing an expired session, without reading the body.
+        res.statusCode = 401;
+        res.setHeader("Content-Type", "application/json");
+        res.end(JSON.stringify({ detail: "Not authenticated" }));
+        return;
+      }
+      const chunks: Buffer[] = [];
+      req.on("data", (c: Buffer) => chunks.push(c));
+      req.on("end", () => {
+        seen.push({ url: req.url ?? "", headers: req.headers, body: Buffer.concat(chunks) });
+        res.setHeader("Content-Type", "application/json");
+        res.end(JSON.stringify({ ok: true }));
+      });
+    });
+    await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));
+    const { port } = server.address() as AddressInfo;
+    // UPSTREAM is read when the module loads, so the env goes first.
+    process.env.BACKEND_ORIGIN = `http://127.0.0.1:${port}`;
+    process.env.GCP_SA_KEY = "{}";
+    route = await import("../app/backend/[...path]/route");
+  });
+
+  afterAll(async () => {
+    await new Promise<void>((r) => server.close(() => r()));
+  });
+
+  /** A multipart body with a known boundary, the way a file upload sends it. */
+  function multipart(bytes: number) {
+    const boundary = `----relayProbe${bytes}`;
+    const crlf = "\r\n";
+    const head = Buffer.from(
+      `--${boundary}${crlf}Content-Disposition: form-data; name="file"; filename="kit.pdf"${crlf}` +
+        `Content-Type: application/pdf${crlf}${crlf}`,
+    );
+    const payload = Buffer.alloc(bytes);
+    for (let i = 0; i < bytes; i += 1) payload[i] = (i * 31 + 7) & 0xff;
+    const tail = Buffer.from(`${crlf}--${boundary}--${crlf}`);
+    return { body: Buffer.concat([head, payload, tail]), contentType: `multipart/form-data; boundary=${boundary}` };
+  }
+
+  const call = (path: string[], init: RequestInit) =>
+    route.POST(
+      new Request(`https://console.example/backend/${path.join("/")}`, init) as unknown as NextRequest,
+      { params: Promise.resolve({ path }) },
+    );
+
+  for (const [label, bytes] of [["1.5 MB", 1_500_000], ["3 MB", 3_000_000], ["4.3 MB", 4_300_000]] as const) {
+    it(`forwards a ${label} multipart upload sent with Expect: 100-continue, byte for byte`, async () => {
+      const { body, contentType } = multipart(bytes);
+      seen.length = 0;
+      const res = await call(["api", "gd", "brands", "b1", "assets"], {
+        method: "POST",
+        headers: {
+          "Content-Type": contentType,
+          "Content-Length": String(body.length),
+          Authorization: "Bearer app-jwt",
+          Expect: "100-continue", // what curl adds to any body over 1 MiB
+          Connection: "keep-alive",
+        },
+        body,
+      });
+
+      expect(res.status).toBe(200);
+      expect(seen).toHaveLength(1);
+      const got = seen[0];
+      expect(got.url).toBe("/api/gd/brands/b1/assets");
+      expect(got.body.length).toBe(body.length);
+      expect(got.body.equals(body)).toBe(true);
+      expect(got.headers["content-type"]).toBe(contentType); // boundary intact
+      expect(got.headers.authorization).toBe("Bearer app-jwt");
+      expect(got.headers["x-serverless-authorization"]).toBe("Bearer test-identity-token");
+      expect(got.headers.expect).toBeUndefined();
+    });
+  }
+
+  it("answers an upstream that drops the connection with a 502 that says so, not an empty 500", async () => {
+    const logged = vi.spyOn(console, "error").mockImplementation(() => {});
+    const res = await call(["api", "drop"], { method: "POST", body: "{}" });
+    expect(res.status).toBe(502);
+    const body = (await res.json()) as { detail: string };
+    expect(body.detail).toMatch(/^No answer from the backend/);
+    // The cause stays in the function log, where an operator can read it.
+    expect(logged).toHaveBeenCalledWith("backend relay: upstream fetch failed", "POST", "/api/drop", expect.anything());
+    logged.mockRestore();
+  });
+
+  /* undici cannot hand back a 401 for a request whose body was a stream — it
+     throws "expected non-null body source" — so a streamed relay turned every
+     expired-session write into an empty 500 and the client never learned to
+     sign in again. The body is buffered now; the 401 must come through. */
+  it("returns the backend's 401 to a write, at any size, instead of failing it", async () => {
+    for (const body of [JSON.stringify({ stage: 3 }), multipart(1_500_000).body]) {
+      const res = await call(["api", "expired"], {
+        method: "POST",
+        headers: { Expect: "100-continue", Authorization: "Bearer expired-jwt" },
+        body,
+      });
+      expect(res.status).toBe(401);
+      expect(await res.json()).toEqual({ detail: "Not authenticated" });
+    }
+  });
+
+  it("strips every per-hop header and keeps the request's own", () => {
+    const out = upstreamHeaders(
+      new Headers({
+        Host: "console.example",
+        Connection: "keep-alive, x-hop-only",
+        "X-Hop-Only": "1",
+        "Keep-Alive": "timeout=5",
+        Expect: "100-continue",
+        TE: "trailers",
+        Upgrade: "h2c",
+        "Content-Length": "123",
+        "Accept-Encoding": "gzip",
+        "Content-Type": "multipart/form-data; boundary=abc",
+        Authorization: "Bearer app-jwt",
+        "X-Forwarded-For": "203.0.113.9",
+      }),
+      "id-token",
+    );
+    for (const h of ["host", "connection", "x-hop-only", "keep-alive", "expect", "te", "upgrade", "content-length", "accept-encoding"]) {
+      expect(out.has(h)).toBe(false);
+    }
+    expect(out.get("content-type")).toBe("multipart/form-data; boundary=abc");
+    expect(out.get("authorization")).toBe("Bearer app-jwt");
+    expect(out.get("x-forwarded-for")).toBe("203.0.113.9");
+    expect(out.get("x-serverless-authorization")).toBe("Bearer id-token");
+
+    const back = downstreamHeaders(new Headers({ "Content-Encoding": "gzip", "Content-Length": "9", "Content-Type": "application/pdf" }));
+    expect(back.has("content-encoding")).toBe(false);
+    expect(back.has("content-length")).toBe(false);
+    expect(back.get("content-type")).toBe("application/pdf");
   });
 });

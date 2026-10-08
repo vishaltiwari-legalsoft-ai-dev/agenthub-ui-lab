@@ -7,8 +7,9 @@
  * page), and this route invokes Cloud Run with a Google identity token minted
  * from GCP_SA_KEY. The token rides in X-Serverless-Authorization, which Cloud
  * Run verifies and strips, leaving the app's own Authorization header intact
- * for FastAPI's JWT auth. Bodies are streamed both ways, so responses are not
- * buffered against the platform's body-size ceiling.
+ * for FastAPI's JWT auth. Responses are streamed back, so a large download is
+ * not buffered against the platform's body-size ceiling; request bodies are
+ * buffered (the platform already holds them, ≤ 4.5 MB) — see below.
  *
  * Local dev never comes through here: NEXT_PUBLIC_API_URL is unset there, so
  * lib/api.ts talks to localhost:8080 directly. Production sets it to
@@ -25,6 +26,13 @@ const UPSTREAM =
   "https://agentsbackend-255561670915.us-central1.run.app";
 
 import { GoogleAuth } from "google-auth-library";
+// Relative, not `@/`: the relay is exercised end to end in vitest, which does
+// not resolve the alias.
+import {
+  downstreamHeaders,
+  upstreamHeaders,
+  upstreamUnreachable,
+} from "../../../lib/relay";
 
 // google-auth-library caches and refreshes the identity token per warm
 // function instance; hand-rolled signing is exactly the kind of crypto that
@@ -47,11 +55,6 @@ async function relay(
   const search = new URL(req.url).search;
   const target = `${UPSTREAM}/${path.map(encodeURIComponent).join("/")}${search}`;
 
-  const headers = new Headers(req.headers);
-  // hop-by-hop and origin-bound headers must not be forwarded
-  for (const h of ["host", "connection", "content-length", "accept-encoding"]) {
-    headers.delete(h);
-  }
   let token: string;
   try {
     token = await identityToken();
@@ -61,24 +64,35 @@ async function relay(
       { status: 503 },
     );
   }
-  headers.set("X-Serverless-Authorization", `Bearer ${token}`);
+  // Per-hop headers never cross. `Expect: 100-continue` (curl, on any body
+  // over 1 MiB) was the one that broke uploads: undici refuses it — see
+  // lib/relay.ts.
+  const headers = upstreamHeaders(req.headers, token);
 
-  const body = req.method === "GET" || req.method === "HEAD" ? undefined : req.body;
-  const upstream = await fetch(target, {
-    method: req.method,
-    headers,
-    body,
-    redirect: "manual",
-    // required by undici whenever a request body is a stream
-    ...(body ? { duplex: "half" as const } : {}),
-  });
-
-  const out = new Headers(upstream.headers);
-  // recomputed by the platform for the re-streamed body
-  for (const h of ["content-encoding", "content-length", "transfer-encoding"]) {
-    out.delete(h);
+  // Buffered, never streamed on. The platform has already read the whole body
+  // (Vercel caps it at 4.5 MB) before this runs, so streaming saved nothing —
+  // and undici cannot hand back a 401 for a request whose body was a stream:
+  // it throws "expected non-null body source" instead, which turned every
+  // expired-session write into an empty 500. A buffered body keeps the 401.
+  const raw = req.method === "GET" || req.method === "HEAD" ? null : await req.arrayBuffer();
+  const body = raw && raw.byteLength > 0 ? raw : undefined;
+  let upstream: Response;
+  try {
+    upstream = await fetch(target, {
+      method: req.method,
+      headers,
+      body,
+      redirect: "manual",
+    });
+  } catch (exc) {
+    console.error("backend relay: upstream fetch failed", req.method, `/${path.join("/")}`, exc);
+    return upstreamUnreachable(exc);
   }
-  return new Response(upstream.body, { status: upstream.status, headers: out });
+
+  return new Response(upstream.body, {
+    status: upstream.status,
+    headers: downstreamHeaders(upstream.headers),
+  });
 }
 
 export {
