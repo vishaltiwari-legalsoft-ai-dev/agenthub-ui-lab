@@ -1302,10 +1302,25 @@
    band with one field-type mark per column, a row-number gutter, states as
    soft select pills, specialists as their own hue chips, and a records bar
    along the bottom. The semantics stay a plain sortable <table>. */
-.app2 .tw--air { padding-bottom: 0; overflow: hidden; }
+
+/* The grid scrolls inside its own card, on both axes, and is never taller than
+   the window under the sticky top nav (113px with its pill row; 140px leaves
+   air). `overflow: hidden` here clipped every column past the card's right
+   edge with no way to reach it, and an unbounded height would put the
+   sideways scrollbar under two hundred rows. Any non-visible overflow still
+   clips to the 14px corners, which is all `hidden` was doing. */
+.app2 .tw--air {
+  padding-bottom: 0;
+  overflow: auto;
+  max-height: max(320px, calc(100dvh - 140px));
+}
 .app2 .tw--air .rt { border-collapse: separate; border-spacing: 0; }
 
+/* Bounded, the card is the scroll container the header sticks to — the
+   reason `.rt thead th` cannot be sticky on an unbounded `.tw` does not apply.
+   `separate` borders travel with the stuck cell. */
 .app2 .tw--air .rt thead th {
+  position: sticky; top: 0; z-index: 1;
   height: 38px; padding: 0 12px; vertical-align: middle;
   background: var(--surface-2);
   border-bottom: 1px solid var(--rule);

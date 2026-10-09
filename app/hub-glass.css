@@ -32,7 +32,9 @@
 
 /* the base grid's cells stop painting over the glass */
 .app2 .tw--air .rt tbody td { background: transparent; }
-.app2 .tw--air .rt thead th,
+/* The header is sticky, so it stays solid: rows scrolling under a see-through
+   band would read through it. Same tint, mixed over the surface, not air. */
+.app2 .tw--air .rt thead th { background: color-mix(in srgb, var(--surface-2) 62%, var(--surface)); }
 .app2 .tw--air .rt tfoot td { background: color-mix(in srgb, var(--surface-2) 62%, transparent); }
 .app2 .tw--air .rt tbody tr.rt__r:hover td { background: color-mix(in srgb, var(--fg) 4%, transparent); }
 .app2 .tw--air .rt__d > td { background: color-mix(in srgb, var(--surface-2) 45%, transparent); }
