@@ -410,6 +410,18 @@
 }
 .gd2-uploadprev-go:hover { text-decoration: underline; }
 
+/* Per-file upload rows (UploadRows.tsx; base rules in hub-live.css) on the
+   studio's own token layer. "Stored" and failure keep the console's --ok and
+   --gap: --gd2-s4 is too light for 11px text on --gd2-paper. */
+.upl.upl--gd2 {
+  --upl-fg: var(--gd2-ink);
+  --upl-soft: var(--gd2-soft);
+  --upl-line: var(--gd2-line);
+  --upl-well: var(--gd2-paper);
+  --upl-bar: var(--gd2-accent);
+  margin: 0;
+}
+
 .gd2-kitcard {
   border: 1px solid var(--gd2-line);
   border-radius: 14px;

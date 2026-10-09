@@ -4,9 +4,9 @@
  *  vitest does not resolve the alias.
  *
  *  Three things live here: the client-side file rules the backend also
- *  enforces (so a 5 MB logo is refused before it is sent, not after), the
- *  save order — JSON first, then every upload against the returned id — and
- *  the words a server `detail` code turns into.
+ *  enforces (so a 60 MB logo is refused before it is sent, not after), the
+ *  save order — JSON first, then every file on its own against the returned
+ *  id — and the words a server `detail` code turns into.
  */
 
 import type {
@@ -14,6 +14,10 @@ import type {
   GdBrandSummary,
 } from "@/lib/api";
 import type { Viewer } from "@/components/hub/model";
+import {
+  directCapFor, uploadBatch,
+  type UploadHooks, type UploadOutcome, type UploadRow,
+} from "../../../lib/directUpload";
 
 /* ------------------------------------------------------------ file rules -- */
 
@@ -23,12 +27,14 @@ export type KitFileKind = GdBrandAssetKind | "reference";
 export interface FileLike { name: string; type: string; size: number }
 
 export interface FileRule {
-  /** Shown in the rejection: "not a PNG, SVG, WebP or JPEG". */
+  /** Shown in the rejection: "not a PNG, SVG, WebP, JPEG or TIFF". */
   accepts: string;
   exts: string[];
   mimes: string[];
+  /** The largest file of this kind the direct upload takes — what the hint
+   *  shows. `fileCap` is the per-file figure (an SVG logo takes less). */
   maxBytes: number;
-  /** Per brand for logos/fonts/guidelines; per request for references. */
+  /** Per brand for logos/fonts/guidelines; per pick for references. */
   maxFiles: number;
   /** The `accept` attribute for the picker. */
   accept: string;
@@ -36,14 +42,18 @@ export interface FileRule {
 
 const MB = 1024 * 1024;
 
+/** The caps are the direct upload's (`directUpload.directCapFor`): files go
+ *  straight to storage, so a 50 MB original is no longer refused here. While
+ *  a server has direct uploads off, a file over the old route's limit is
+ *  refused at save, in words that say so. */
 export const FILE_RULES: Record<KitFileKind, FileRule> = {
   logo: {
-    accepts: "PNG, SVG, WebP or JPEG",
-    exts: ["png", "svg", "webp", "jpg", "jpeg"],
-    mimes: ["image/png", "image/svg+xml", "image/webp", "image/jpeg"],
-    maxBytes: 5 * MB,
+    accepts: "PNG, SVG, WebP, JPEG or TIFF",
+    exts: ["png", "svg", "webp", "jpg", "jpeg", "tif", "tiff"],
+    mimes: ["image/png", "image/svg+xml", "image/webp", "image/jpeg", "image/tiff"],
+    maxBytes: 50 * MB,
     maxFiles: 8,
-    accept: "image/png,image/svg+xml,image/webp,image/jpeg,.png,.svg,.webp,.jpg,.jpeg",
+    accept: "image/png,image/svg+xml,image/webp,image/jpeg,image/tiff,.png,.svg,.webp,.jpg,.jpeg,.tif,.tiff",
   },
   font: {
     accepts: "TTF or OTF",
@@ -60,22 +70,25 @@ export const FILE_RULES: Record<KitFileKind, FileRule> = {
     accepts: "PDF",
     exts: ["pdf"],
     mimes: ["application/pdf"],
-    maxBytes: 20 * MB,
+    maxBytes: 50 * MB,
     maxFiles: 1,
     accept: "application/pdf,.pdf",
   },
   reference: {
-    accepts: "PNG, JPEG or WebP",
-    exts: ["png", "jpg", "jpeg", "webp"],
-    mimes: ["image/png", "image/jpeg", "image/webp"],
-    maxBytes: 10 * MB,
+    accepts: "PNG, JPEG, WebP or TIFF",
+    exts: ["png", "jpg", "jpeg", "webp", "tif", "tiff"],
+    mimes: ["image/png", "image/jpeg", "image/webp", "image/tiff"],
+    maxBytes: 50 * MB,
     maxFiles: 10,
-    accept: "image/png,image/jpeg,image/webp,.png,.jpg,.jpeg,.webp",
+    accept: "image/png,image/jpeg,image/webp,image/tiff,.png,.jpg,.jpeg,.webp,.tif,.tiff",
   },
 };
 
-/** The most references one request may carry — the backend's own limit. */
+/** The most references one pick may add. Each file then goes up on its own. */
 export const REFERENCE_BATCH = FILE_RULES.reference.maxFiles;
+
+/** The cap for this one file — an SVG logo takes 5 MB, a raster one 50. */
+export const fileCap = (kind: KitFileKind, file: FileLike): number => directCapFor(kind, file);
 
 export const formatMb = (bytes: number): string => {
   const mb = bytes / MB;
@@ -109,10 +122,11 @@ export function checkFiles<F extends FileLike>(
   let room = Math.max(0, rule.maxFiles - alreadyHave);
   for (const file of files) {
     const typeOk = rule.exts.includes(extOf(file.name)) || (file.type !== "" && rule.mimes.includes(file.type));
+    const cap = fileCap(kind, file);
     if (!typeOk) {
       rejected.push({ file, reason: `Not a ${rule.accepts} file` });
-    } else if (file.size > rule.maxBytes) {
-      rejected.push({ file, reason: `File too large (max ${formatMb(rule.maxBytes)})` });
+    } else if (file.size > cap) {
+      rejected.push({ file, reason: `File too large (max ${formatMb(cap)})` });
     } else if (room <= 0) {
       rejected.push({
         file,
@@ -245,32 +259,22 @@ export const referencesRemaining = (count: number, cap: number): number => Math.
  *  stored before the flag is hidden the button rather than offered a 403. */
 export const canArchiveBrand = (viewer: Viewer | null | undefined): boolean => !!viewer?.is_admin;
 
-const KIND_NOUN: Record<KitFileKind, string> = {
-  logo: "Logo", font: "Font", guidelines: "Guidelines PDF", reference: "Reference image",
-};
-
-/** "Logo must be PNG, SVG, WebP or JPEG under 5 MB" — the rule the backend
- *  applied, named by kind so the person knows which limit they met. */
-const fileRuleWords = (kind: KitFileKind): string =>
-  `${KIND_NOUN[kind]} must be ${FILE_RULES[kind].accepts} under ${formatMb(FILE_RULES[kind].maxBytes)}.`;
-
-/** The backend's `detail` codes (gd_brands.py), in words that name the limit.
- *  Some depend on which upload was refused, so each is a function of the kind
- *  when the caller knows it. Anything else is shown as sent — a sentence the
+/** The backend's `detail` codes (gd_brands.py), in words. This is for the
+ *  brand-level calls — create, PATCH, a reference removed, an archive. A file
+ *  that did not upload is worded by `lib/directUpload.ts`, per file, with the
+ *  limit that applied to it. Anything else is shown as sent — a sentence the
  *  backend wrote is better than one this file guessed. */
-const DETAIL_WORDS: Record<string, (kind?: KitFileKind) => string> = {
+const DETAIL_WORDS: Record<string, () => string> = {
   brand_exists: () => "A brand with this name already exists.",
   brand_not_editable: () => "This brand is built in — its kit cannot be changed here.",
   brand_not_found: () => "This brand no longer exists — it may have been archived.",
   reference_cap_reached: () => "This brand already holds as many references as it can.",
-  file_too_large: (kind) => (kind ? fileRuleWords(kind) : "The file is larger than the upload limit."),
-  unsupported_file_type: (kind) => (kind ? fileRuleWords(kind) : "That file type is not accepted."),
+  file_too_large: () => "The file is larger than the upload limit.",
+  unsupported_file_type: () => "That file type is not accepted.",
   image_too_large: () => "Image is larger than 4096 px on a side (or an SVG with an embedded image) — please resize it.",
   empty_file: () => "The file is empty.",
   no_files: () => "No file was sent.",
-  too_many_files: (kind) => (kind
-    ? `Only ${FILE_RULES[kind].maxFiles} ${kind === "reference" ? "references" : `${kind} files`} per upload.`
-    : "Too many files in one upload."),
+  too_many_files: () => "Too many files in one upload.",
   font_limit_reached: () => `This brand already has ${FILE_RULES.font.maxFiles} font files — remove one first.`,
   logo_limit_reached: () => `This brand already has ${FILE_RULES.logo.maxFiles} logos — remove one first.`,
 };
@@ -283,11 +287,9 @@ const statusOf = (e: unknown): number | null => {
   return typeof status === "number" ? status : null;
 };
 
-/** `kind` is the upload that was refused, when the caller knows it — it turns
- *  `file_too_large` into the logo's limit rather than "a" limit. */
-export function describeBrandFailure(e: unknown, fallback: string, kind?: KitFileKind): string {
+export function describeBrandFailure(e: unknown, fallback: string): string {
   const msg = e instanceof Error ? e.message.trim() : "";
-  if (Object.prototype.hasOwnProperty.call(DETAIL_WORDS, msg)) return DETAIL_WORDS[msg](kind);
+  if (Object.prototype.hasOwnProperty.call(DETAIL_WORDS, msg)) return DETAIL_WORDS[msg]();
   // A reply with no `detail` is not the backend's — an edge in front of it
   // (Cloud Run's request-size limit answers 413 with an HTML body).
   const generic = msg === "" || /^Request failed/.test(msg);
@@ -301,16 +303,24 @@ export function describeBrandFailure(e: unknown, fallback: string, kind?: KitFil
 
 /* ------------------------------------------------------------------- save -- */
 
-/** The calls the save needs, as an interface so a test can hand in fakes. */
+/** The calls the save needs, as an interface so a test can hand in fakes.
+ *  Each upload is ONE file (`directUpload` in the sheet): its own request, its
+ *  own progress and its own result. */
 export interface BrandKitApi<F extends FileLike = File> {
   create: (body: GdBrandInput) => Promise<GdBrandDetail>;
   patch: (brandId: string, body: Partial<GdBrandInput>) => Promise<GdBrandDetail>;
-  uploadAssets: (brandId: string, kind: GdBrandAssetKind, files: F[]) => Promise<GdBrandDetail>;
-  uploadReferences: (
+  uploadAsset: (
     brandId: string,
-    files: F[],
+    kind: GdBrandAssetKind,
+    file: F,
+    hooks: UploadHooks,
+  ) => Promise<{ brand: GdBrandDetail } & UploadOutcome>;
+  uploadReference: (
+    brandId: string,
+    file: F,
     meta: { kind?: GdBrandReferenceKind; creative_type?: string; note?: string },
-  ) => Promise<{ references: GdBrandReference[]; reference_count: number }>;
+    hooks: UploadHooks,
+  ) => Promise<{ references: GdBrandReference[]; reference_count: number } & UploadOutcome>;
 }
 
 export interface PendingUploads<F extends FileLike = File> {
@@ -332,72 +342,117 @@ export const emptyPending = <F extends FileLike = File>(): PendingUploads<F> => 
 export const hasPending = (p: PendingUploads<FileLike>): boolean =>
   p.logo.length + p.font.length + p.guidelines.length + p.reference.length > 0;
 
-export interface SaveOutcome {
+export interface SaveOutcome<F extends FileLike = File> {
   /** The brand as the backend last returned it. Null only when the JSON step
    *  itself failed — nothing was created and there is nothing to keep. */
   brand: GdBrandDetail | null;
-  /** Uploads that did not land, in words, in the order they were tried. The
-   *  brand exists regardless; the sheet stays open on it with these shown. */
+  /** What stopped the save itself, in words — the JSON step. A file that did
+   *  not land is not here: it is a `failed` row. */
   problems: string[];
+  /** One row per file, in the order they were sent: stored, or the reason. */
+  rows: UploadRow[];
+  /** The files that did not land, by kind — kept so a retry needs no re-pick. */
+  failed: Pick<PendingUploads<F>, KitFileKind>;
 }
 
-/** JSON first, then the files against the returned id. Each upload is its own
- *  request and its own failure: a font that is refused does not stop the logo,
- *  and a brand that was created is never reported as if it was not. */
+/** The backend refusal that holds for every later file of the same kind. */
+const CAP_CODES: Partial<Record<KitFileKind, string>> = {
+  logo: "logo_limit_reached",
+  font: "font_limit_reached",
+  reference: "reference_cap_reached",
+};
+/** …and the ones that hold for every later file at all. */
+const BRAND_GONE_CODES = ["brand_not_editable", "brand_not_found"];
+
+const codeOf = (e: unknown): string | null => {
+  const code = (e as { code?: unknown } | null)?.code;
+  return typeof code === "string" ? code : null;
+};
+
+const sameRef = (a: GdBrandReference, b: GdBrandReference) => a.ref_id === b.ref_id;
+
+/** Add references the brand does not hold yet, by id. */
+const withReferences = (
+  brand: GdBrandDetail,
+  added: GdBrandReference[],
+  count: number,
+): GdBrandDetail => ({
+  ...brand,
+  references: [...brand.references, ...added.filter((r) => !brand.references.some((x) => sameRef(x, r)))],
+  reference_count: count,
+});
+
+/** JSON first, then every file on its own against the returned id: at most
+ *  three sending at once, finalized one at a time. Each file is its own
+ *  request and its own result — a font that is refused does not stop the
+ *  logo, and a brand that was created is never reported as if it was not.
+ *  A cap one file hits fails the later files of its kind with the same
+ *  reason, unsent; no file is dropped without one. */
 export async function saveBrandKit<F extends FileLike>(
   api: BrandKitApi<F>,
   brandId: string | null,
   draft: BrandDraft,
   pending: PendingUploads<F>,
-): Promise<SaveOutcome> {
+  onRows: (rows: UploadRow[]) => void = () => {},
+): Promise<SaveOutcome<F>> {
+  const failed: SaveOutcome<F>["failed"] = { logo: [], font: [], guidelines: [], reference: [] };
   const body = toInput(draft);
   let brand: GdBrandDetail;
   try {
     brand = brandId ? await api.patch(brandId, body) : await api.create(body);
   } catch (e) {
-    return { brand: null, problems: [describeBrandFailure(e, "The brand could not be saved.")] };
+    return { brand: null, problems: [describeBrandFailure(e, "The brand could not be saved.")], rows: [], failed };
   }
   const id = brand.brand_id;
-  const problems: string[] = [];
 
-  const assetKinds: { kind: GdBrandAssetKind; files: F[]; what: string }[] = [
-    { kind: "logo", files: pending.logo, what: "logo" },
-    { kind: "font", files: pending.font, what: "fonts" },
-    { kind: "guidelines", files: pending.guidelines, what: "guidelines" },
+  const jobs: { kind: KitFileKind; file: F }[] = [
+    ...pending.logo.map((file) => ({ kind: "logo" as const, file })),
+    ...pending.font.map((file) => ({ kind: "font" as const, file })),
+    ...pending.guidelines.map((file) => ({ kind: "guidelines" as const, file })),
+    ...pending.reference.map((file) => ({ kind: "reference" as const, file })),
   ];
-  for (const { kind, files, what } of assetKinds) {
-    if (files.length === 0) continue;
-    try {
-      brand = await api.uploadAssets(id, kind, files);
-    } catch (e) {
-      problems.push(`The ${what} did not upload: ${describeBrandFailure(e, "the request failed.", kind)}`);
-    }
-  }
+  const meta = {
+    kind: pending.reference_kind,
+    creative_type: pending.reference_creative_type || undefined,
+    note: pending.reference_note || undefined,
+  };
+  const stopped: Partial<Record<KitFileKind, string>> = {};
+  let allStopped: string | null = null;
+  let rows: UploadRow[] = [];
 
-  for (let i = 0; i < pending.reference.length; i += REFERENCE_BATCH) {
-    const batch = pending.reference.slice(i, i + REFERENCE_BATCH);
-    try {
-      const r = await api.uploadReferences(id, batch, {
-        kind: pending.reference_kind,
-        creative_type: pending.reference_creative_type || undefined,
-        note: pending.reference_note || undefined,
-      });
-      brand = {
-        ...brand,
-        references: [...brand.references, ...r.references],
-        reference_count: r.reference_count,
-      };
-    } catch (e) {
-      const which = pending.reference.length > REFERENCE_BATCH
-        ? `References ${i + 1}–${i + batch.length}`
-        : "The references";
-      problems.push(`${which} did not upload: ${describeBrandFailure(e, "the request failed.", "reference")}`);
-      // A cap reached on one batch is reached for the rest too.
-      if (e instanceof Error && e.message === "reference_cap_reached") break;
-    }
-  }
+  const results = await uploadBatch(
+    jobs,
+    async (job, hooks) => {
+      if (job.kind === "reference") {
+        const r = await api.uploadReference(id, job.file, meta, hooks);
+        brand = withReferences(brand, r.references, r.reference_count);
+        return r;
+      }
+      const r = await api.uploadAsset(id, job.kind, job.file, hooks);
+      // The asset's reply is the whole brand as stored now; keep any
+      // reference this save added that it does not list yet.
+      const fresh = withReferences(r.brand, brand.references, Math.max(r.brand.reference_count, brand.reference_count));
+      brand = fresh;
+      return r;
+    },
+    (next) => {
+      rows = next;
+      onRows(next);
+    },
+    {
+      skip: (job) => allStopped ?? stopped[job.kind] ?? null,
+      onFailure: (job, error) => {
+        const code = codeOf(error);
+        const reason = error instanceof Error ? error.message : null;
+        if (!code || !reason) return;
+        if (BRAND_GONE_CODES.includes(code)) allStopped = reason;
+        else if (CAP_CODES[job.kind] === code) stopped[job.kind] = reason;
+      },
+    },
+  );
 
-  return { brand, problems };
+  for (const r of results) if ("error" in r) failed[r.job.kind].push(r.job.file);
+  return { brand, problems: [], rows, failed };
 }
 
 /* ------------------------------------------------------- the brand picker -- */

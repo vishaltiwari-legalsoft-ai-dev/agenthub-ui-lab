@@ -12,8 +12,9 @@ import { PlanReview } from "./PlanReview";
 import { StyleGallery } from "./StyleGallery";
 import { pickDefaultStyle } from "./styleChoice";
 import { DEFAULT_PLAN_LAYOUT } from "./wireframe";
-import { attachErrorMessage, canAttach, MAX_PROMPT_IMAGES } from "./promptAttach";
+import { attachErrorMessage, attachReport, canAttach, MAX_PROMPT_IMAGES } from "./promptAttach";
 import { BrandKitSheet } from "./BrandKitSheet";
+import { UploadRows } from "./UploadRows";
 import {
   STILL_GENERATING,
   isStageStillRunning,
@@ -33,7 +34,19 @@ import {
 } from "./brandKit";
 import { useAuth } from "@/lib/auth";
 import {
+  directCapFor,
+  failureWords,
+  formatSize,
+  newRow,
+  rowFailed,
+  rowProgress,
+  rowStored,
+  uploadBatch,
+  type UploadRow,
+} from "@/lib/directUpload";
+import {
   creativeTypes,
+  directUpload,
   gdApprove,
   gdArtifactBlob,
   gdBack,
@@ -47,7 +60,6 @@ import {
   gdGetRun,
   gdPlan,
   gdStage4,
-  gdSubjectUpload,
   gdSuggest,
   gdSuggestPlacement,
   gdTextPreview,
@@ -199,6 +211,10 @@ export function GraphicsStudioV2({
   const [aspect, setAspect] = useState<string>("");
   const [brief, setBrief] = useState("");
   const [attached, setAttached] = useState<{ file: File; url: string }[]>([]);
+  // Per-file results: the brief's images as they go up, and the one photo
+  // uploaded from the side panel (background or subject).
+  const [attachRows, setAttachRows] = useState<UploadRow[]>([]);
+  const [sideUpload, setSideUpload] = useState<UploadRow | null>(null);
   const attachInput = useRef<HTMLInputElement | null>(null);
   const [run, setRun] = useState<GdRun | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
@@ -778,13 +794,24 @@ export function GraphicsStudioV2({
         ...(brief.trim() ? { creative_brief: { goal: brief.trim() } } : {}),
       });
       // Brief-attached images go up before anything generates (or plans) so
-      // Stage-1/2 AI generation sees them; a failed upload never blocks the run.
-      for (const a of attached) {
-        try {
-          await gdSubjectUpload(created.id, a.file, "prompt");
-        } catch {
-          onToast(`Couldn't attach ${a.file.name} — continuing without it.`, "error");
-        }
+      // Stage-1/2 AI generation sees them — straight to storage, three at a
+      // time, each with its own row. A failed one never blocks the run, and it
+      // is named with its reason (here and in the chat), never dropped.
+      let attachedNow: UploadRow[] = [];
+      if (attached.length) {
+        await uploadBatch(
+          attached.map((a) => ({ file: a.file })),
+          (job, hooks) => directUpload("prompt", created.id, job.file, hooks),
+          (rows) => {
+            attachedNow = rows;
+            setAttachRows(rows);
+          },
+        );
+      }
+      const attachNews = attachReport(attachedNow);
+      if (attachNews.failed.length) {
+        const n = attachNews.failed.length;
+        onToast(`${n} attached image${n === 1 ? "" : "s"} did not upload — continuing without ${n === 1 ? "it" : "them"}.`, "warn");
       }
       setRun(created);
       setSel1(null);
@@ -802,6 +829,7 @@ export function GraphicsStudioV2({
             ? `Working from your brief: “${brief.trim()}”. Pick a background to start — I'll chip in at every step.`
             : "Pick a background to start — I'll chip in with suggestions at every step.",
         },
+        ...[...attachNews.failed, ...attachNews.notes].map((text): GdChatMessage => ({ role: "agent", text })),
       ]);
       setPhase("studio");
       if (autoMode) {
@@ -1152,13 +1180,34 @@ export function GraphicsStudioV2({
       onToast("Start a design first, then upload your photo.", "warn");
       return;
     }
-    if (file.size > 10 * 1024 * 1024) {
-      onToast("That image is over 10 MB — please use a smaller file.", "warn");
+    const role = cur === 1 ? "background" : "subject";
+    // The direct upload's cap (50 MB), not the old route's 10 MB: the file
+    // goes straight to storage. Over it, the row says so and nothing is sent.
+    const cap = directCapFor(role, file);
+    if (file.size > cap) {
+      setSideUpload(rowFailed(newRow("side", file), `This file is ${formatSize(file.size)}; the limit is ${formatSize(cap)}.`));
       return;
     }
-    const role = cur === 1 ? "background" : "subject";
+    let row = newRow("side", file);
+    setSideUpload(row);
+    const show = (next: UploadRow) => {
+      row = next;
+      setSideUpload(next);
+    };
     void guard(`Uploading “${file.name}”…`, async () => {
-      const { ref } = await gdSubjectUpload(run.id, file, role);
+      let ref: string;
+      try {
+        const stored = await directUpload(role, run.id, file, {
+          onProgress: (p) => show(rowProgress(row, p)),
+        });
+        ref = stored.ref;
+        show(rowStored(row, stored.upload, stored.route));
+      } catch (err) {
+        // The row carries the reason; the toast only points at it.
+        show(rowFailed(row, failureWords(err)));
+        if (!isAbortError(err)) onToast(`“${file.name}” did not upload — the reason is under the upload button.`, "warn");
+        return;
+      }
       if (role === "background") {
         await gdUpdateConfig(run.id, { background_asset_ref: ref });
         setSel1("UPLOAD");
@@ -1213,6 +1262,8 @@ export function GraphicsStudioV2({
   const resetAll = () => {
     setPhase("setup");
     setRun(null);
+    setAttachRows([]);
+    setSideUpload(null);
     setSel1(null);
     setSel2(null);
     setLogos([]);
@@ -1393,7 +1444,7 @@ export function GraphicsStudioV2({
                       <input
                         ref={attachInput}
                         type="file"
-                        accept="image/png,image/jpeg,image/webp"
+                        accept="image/png,image/jpeg,image/webp,image/tiff,.tif,.tiff"
                         multiple
                         hidden
                         onChange={(e) => onAttachFiles(e.target.files)}
@@ -1419,6 +1470,7 @@ export function GraphicsStudioV2({
                           ))}
                         </div>
                       ) : null}
+                      <UploadRows rows={attachRows} tone="gd2" label="Attached images" />
                     </div>
                   </div>
                 ) : null}
@@ -2041,12 +2093,13 @@ export function GraphicsStudioV2({
             ⬆ {cur === 1 ? "Upload a background photo" : run.config.subject_asset_ref ? "Replace your photo" : "Upload your own photo"}
             <input
               type="file"
-              accept="image/png,image/webp,image/jpeg"
+              accept="image/png,image/webp,image/jpeg,image/tiff,.tif,.tiff"
               hidden
               onChange={onUpload}
               disabled={busy !== null}
             />
           </label>
+          {sideUpload ? <UploadRows rows={[sideUpload]} tone="gd2" label="Your photo upload" /> : null}
           {run.config.background_asset_ref ? (
             <div className="gd2-uploadprev">
               <AuthImg

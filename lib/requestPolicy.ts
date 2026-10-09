@@ -48,6 +48,13 @@ export const SLOW_TIMEOUT_MS = 600_000;
 /** Pass as `timeoutMs` to opt a call out of deadlines entirely. */
 export const NO_TIMEOUT = 0;
 
+/** A file PUT straight to Cloud Storage on a signed URL (`directUpload.ts`).
+ *  Not an API call — no bearer, no relay, no `send()` — so no rule below
+ *  applies to it. The deadline is the whole transfer of up to 50 MB, sized for
+ *  a slow uplink (about 85 KB/s), not for a slow server. The signed URL itself
+ *  is valid for the same ten minutes. */
+export const UPLOAD_PUT_TIMEOUT_MS = 600_000;
+
 type Method = "GET" | "POST" | "PUT" | "PATCH" | "DELETE";
 
 interface DeadlineRule {
@@ -65,6 +72,10 @@ interface DeadlineRule {
 export const DEADLINE_RULES: readonly DeadlineRule[] = [
   // Graphic Designer: the 4-stage image pipeline (planning, generation, 4K).
   { pattern: /^\/api\/gd\/runs\/[^/]+\/(plan|generate|suggest|suggest-placement|text-preview|tweak|stage4)$/, ms: SLOW_TIMEOUT_MS },
+  // A direct upload's finalize: it may wait 30 s for the instance's one decode
+  // slot, decodes up to ~100 MP, and copies a 50 MB original server-side. A
+  // cut here is safe to repeat — the same ticket answers the same result.
+  { pattern: /^\/api\/gd\/(brands|runs)\/[^/]+\/uploads\/finalize$/, methods: ["POST"], ms: SLOW_TIMEOUT_MS },
   // Creative rail: brochure / carousel / PPTX rendering.
   { pattern: /^\/api\/creative\/runs\/[^/]+\/(plan|generate|autonomous)$/, ms: SLOW_TIMEOUT_MS },
   // Blog writer: deep research, drafting, visual prompts, site inventory.

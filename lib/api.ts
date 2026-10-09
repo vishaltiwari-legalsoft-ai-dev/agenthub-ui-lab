@@ -7,9 +7,15 @@
  */
 
 import {
-  createDeadline, deadlineFor, RequestTimeoutError,
+  createDeadline, deadlineFor, isAbortError, RequestTimeoutError, UPLOAD_PUT_TIMEOUT_MS,
   type Deadline, type RequestOptions,
 } from "./requestPolicy";
+import {
+  readOriginal, readUploadSummary, runDirectUpload, StoragePutError, storageHeaders,
+  type RunUploadSurface, type SerialQueue, type UploadOriginal,
+  type UploadProgress, type UploadRoute, type UploadSignature, type UploadSummary,
+  type UploadSurface,
+} from "./directUpload";
 /** The UI lab's demo mode (see lib/demo.ts): on only when a build explicitly
  *  sets NEXT_PUBLIC_PREVIEW_NO_AUTH=1 (next.config.mjs sets no default). The
  *  fixture module is loaded lazily and only on that path, so a live build
@@ -18,6 +24,10 @@ const DEMO_MODE = process.env.NEXT_PUBLIC_PREVIEW_NO_AUTH === "1";
 
 export { isAbortError, isTimeoutError, NO_TIMEOUT, RequestSequence, RequestTimeoutError } from "./requestPolicy";
 export type { RequestOptions, RequestTicket } from "./requestPolicy";
+export type {
+  BrandUploadSurface, RunUploadSurface, UploadOriginal, UploadProgress, UploadRoute,
+  UploadSummary, UploadSurface,
+} from "./directUpload";
 
 export const API_URL =
   process.env.NEXT_PUBLIC_API_URL?.replace(/\/$/, "") || "http://localhost:8080";
@@ -44,9 +54,23 @@ export function setUnauthorizedHandler(fn: () => void): void {
  *  identical as prose, and telling them apart by matching on that prose is how
  *  a reworded sentence silently turns one into the other. */
 export class ApiError extends Error {
-  constructor(message: string, readonly status: number) {
+  /** The backend's stable `detail.code`, when its `detail` was an object. */
+  readonly code: string | null;
+  /** The reply's `detail` as sent — the facts beside a code (`accepted`,
+   *  `width`, `limit_bytes`, …). Undefined when the reply had none. */
+  readonly detail: unknown;
+  /** Seconds from `Retry-After` (or `detail.retry_after`), when given. */
+  readonly retryAfterS: number | null;
+  constructor(
+    message: string,
+    readonly status: number,
+    extra: { code?: string | null; detail?: unknown; retryAfterS?: number | null } = {},
+  ) {
     super(message);
     this.name = "ApiError";
+    this.code = extra.code ?? null;
+    this.detail = extra.detail;
+    this.retryAfterS = extra.retryAfterS ?? null;
   }
 }
 
@@ -55,13 +79,54 @@ export class ApiError extends Error {
 export const apiStatus = (e: unknown): number | null =>
   e instanceof ApiError ? e.status : null;
 
+/** The sentence in a `detail`: FastAPI's plain string, or the `message` of the
+ *  `{code, message}` object the upload routes answer with. A list (pydantic's
+ *  validation errors) or an object without one has no sentence to show. */
+function detailMessage(detail: unknown): string | null {
+  if (typeof detail === "string") return detail;
+  if (typeof detail === "object" && detail !== null && !Array.isArray(detail)) {
+    const message = (detail as { message?: unknown }).message;
+    if (typeof message === "string") return message;
+  }
+  return null;
+}
+
 async function parseError(response: Response): Promise<string> {
   try {
     const data = await response.json();
-    return typeof data?.detail === "string" ? data.detail : "Request failed";
+    return detailMessage(data?.detail) ?? "Request failed";
   } catch {
     return `Request failed (${response.status})`;
   }
+}
+
+/** `Retry-After` in seconds — the delta form; an HTTP date is not used here. */
+const retryAfterSeconds = (raw: string | null | undefined): number | null => {
+  if (!raw || !/^\d+$/.test(raw.trim())) return null;
+  return Number(raw.trim());
+};
+
+/** A non-2xx reply as an `ApiError` that keeps the structured `detail`, its
+ *  code and `Retry-After` — the upload rules (`directUpload.ts`) decide on
+ *  those, never on the prose. The header can be unreadable cross-origin, so
+ *  `detail.retry_after` is the fallback for it. */
+async function apiErrorFrom(response: Response): Promise<ApiError> {
+  let detail: unknown;
+  let message = `Request failed (${response.status})`;
+  try {
+    const data = await response.json();
+    detail = data?.detail;
+    message = detailMessage(detail) ?? "Request failed";
+  } catch {
+    /* no JSON body: an edge in front of the backend answered */
+  }
+  const d = typeof detail === "object" && detail !== null && !Array.isArray(detail)
+    ? (detail as { code?: unknown; retry_after?: unknown })
+    : null;
+  const code = typeof d?.code === "string" ? d.code : null;
+  const fromBody = typeof d?.retry_after === "number" ? d.retry_after : null;
+  const retryAfterS = retryAfterSeconds(response.headers?.get("Retry-After")) ?? fromBody;
+  return new ApiError(message, response.status, { code, detail, retryAfterS });
 }
 
 /** The single choke point for every call in this file, so the deadline and the
@@ -144,7 +209,7 @@ async function requestJson<T>(
 ): Promise<T> {
   const { response, deadline, timedOut } = await send(path, init, opts ?? {});
   try {
-    if (!response.ok) throw new ApiError(await parseError(response), response.status);
+    if (!response.ok) throw await apiErrorFrom(response);
     return (await response.json()) as T;
   } catch (e) {
     if (deadline.expired) throw timedOut();
@@ -1114,7 +1179,15 @@ export interface GdBrandSummary {
   reference_count: number;
 }
 
-export interface GdBrandAsset { path: string; url: string; name: string }
+export interface GdBrandAsset {
+  path: string;
+  /** A signed link. For a font or PDF that came in as a direct upload it is
+   *  the original, as an attachment download. */
+  url: string;
+  name: string;
+  /** Direct uploads only; null for everything stored before them. */
+  original: UploadOriginal | null;
+}
 
 export type GdBrandReferenceKind = "creative" | "reference";
 
@@ -1127,6 +1200,8 @@ export interface GdBrandReference {
   creative_type: string | null;
   note: string;
   created_at: string;
+  /** Direct uploads only; null for everything stored before them. */
+  original: UploadOriginal | null;
 }
 
 export interface GdBrandColors { primary: string[]; secondary: string[]; accent: string[] }
@@ -1178,17 +1253,29 @@ const brandSummary = (raw: RawBrandSummary): GdBrandSummary => ({
 /** A brand detail as the backend actually sent it — every field optional, the
  *  same deploy-skew rule as `RawBrandSummary`. */
 type RawBrandDetail = RawBrandSummary & Partial<Omit<GdBrandDetail, keyof GdBrandSummary | "references" | "assets">> & {
-  references?: Partial<GdBrandReference>[];
-  assets?: Partial<GdBrandDetail["assets"]>;
+  references?: RawBrandReference[];
+  assets?: Partial<Record<keyof GdBrandDetail["assets"], RawBrandAsset[]>>;
 };
 
-const brandReference = (raw: Partial<GdBrandReference>): GdBrandReference => ({
+/** `original` arrives only on direct uploads, so it is read, never assumed. */
+type RawBrandReference = Partial<Omit<GdBrandReference, "original">> & { original?: unknown };
+type RawBrandAsset = Partial<Omit<GdBrandAsset, "original">> & { original?: unknown };
+
+const brandReference = (raw: RawBrandReference): GdBrandReference => ({
   ref_id: raw.ref_id ?? "",
   url: raw.url ?? "",
   kind: raw.kind === "creative" ? "creative" : "reference",
   creative_type: raw.creative_type ?? null,
   note: raw.note ?? "",
   created_at: raw.created_at ?? "",
+  original: readOriginal(raw.original),
+});
+
+const brandAsset = (raw: RawBrandAsset): GdBrandAsset => ({
+  path: raw.path ?? "",
+  url: raw.url ?? "",
+  name: raw.name ?? raw.path?.split("/").pop() ?? "",
+  original: readOriginal(raw.original),
 });
 
 const brandDetail = (raw: RawBrandDetail): GdBrandDetail => ({
@@ -1204,9 +1291,9 @@ const brandDetail = (raw: RawBrandDetail): GdBrandDetail => ({
     accent: raw.colors?.accent ?? [],
   },
   assets: {
-    logos: raw.assets?.logos ?? [],
-    fonts: raw.assets?.fonts ?? [],
-    guidelines: raw.assets?.guidelines ?? [],
+    logos: (raw.assets?.logos ?? []).map(brandAsset),
+    fonts: (raw.assets?.fonts ?? []).map(brandAsset),
+    guidelines: (raw.assets?.guidelines ?? []).map(brandAsset),
   },
   references: (raw.references ?? []).map(brandReference).filter((r) => r.ref_id),
   reference_cap: raw.reference_cap ?? 200,
@@ -1547,6 +1634,218 @@ export async function gdSubjectUpload(
   const form = new FormData();
   form.append("file", file);
   return sendForm<{ ref: string }>(`/api/gd/runs/${runId}/subject/upload?role=${role}`, form);
+}
+
+/* --------------- Direct-to-storage uploads (backend GD_DIRECT_UPLOADS) ------ */
+// Every GD file goes browser → Cloud Storage on a signed URL: the relay cannot
+// carry a body over 4.5 MB, and originals run to 50 MB. The decisions — retry,
+// fallback, words, rows — are in `directUpload.ts`; this is the I/O.
+
+/** True when calls go through the same-origin relay, and so carry its 4.5 MB
+ *  ceiling on a request body (`lib/relay.ts`). Local dev calls the backend
+ *  directly and is held only to the routes' own limits. */
+const RELAYED = API_URL.startsWith("/");
+
+/** A logo, font or guidelines PDF, stored: the brand as it now stands. */
+export interface GdBrandAssetUpload { brand: GdBrandDetail; upload: UploadSummary | null; route: UploadRoute }
+/** One reference, stored. */
+export interface GdReferenceUpload {
+  references: GdBrandReference[];
+  reference_count: number;
+  upload: UploadSummary | null;
+  route: UploadRoute;
+}
+/** A run image, stored. `ref` is used exactly like the multipart routes' ref:
+ *  `subject_asset_ref`, `background_asset_ref`, an image element's `ref`; a
+ *  prompt image is already attached to the run's config by the server. */
+export interface GdRunUpload { ref: string; role: string; upload: UploadSummary | null; route: UploadRoute }
+
+export interface DirectUploadOptions {
+  /** References only — the fields the multipart references route takes. */
+  meta?: { kind?: GdBrandReferenceKind; creative_type?: string | null; note?: string };
+  onProgress?: (p: UploadProgress) => void;
+  signal?: AbortSignal;
+  /** Shared across one batch so its finalizes run one at a time. */
+  finalizeQueue?: SerialQueue;
+}
+
+const abortError = (): Error => Object.assign(new Error("The upload was cancelled."), { name: "AbortError" });
+
+/** PUT one file to its signed URL with exactly the signed headers — no app
+ *  token and no cookies go to storage. XHR in a browser, for progress; plain
+ *  `fetch` where there is none. Resolves with storage's status for any
+ *  answer; rejects with a `StoragePutError` when there was no answer. */
+function putToStorage(
+  sig: UploadSignature,
+  file: Blob,
+  onBytes: (sent: number, total: number) => void,
+  signal?: AbortSignal,
+): Promise<number> {
+  if (signal?.aborted) return Promise.reject(abortError());
+  if (typeof XMLHttpRequest === "undefined") return putWithFetch(sig, file, onBytes, signal);
+  return new Promise<number>((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    const onAbort = () => xhr.abort();
+    const settle = () => signal?.removeEventListener("abort", onAbort);
+    xhr.open(sig.method || "PUT", sig.upload_url);
+    for (const [name, value] of Object.entries(storageHeaders(sig.headers))) xhr.setRequestHeader(name, value);
+    xhr.withCredentials = false;
+    xhr.timeout = UPLOAD_PUT_TIMEOUT_MS;
+    xhr.upload.onprogress = (e) => onBytes(e.loaded, e.lengthComputable ? e.total : file.size);
+    xhr.onload = () => {
+      settle();
+      if (xhr.status >= 200 && xhr.status < 300) onBytes(file.size, file.size);
+      resolve(xhr.status);
+    };
+    xhr.onerror = () => {
+      settle();
+      reject(new StoragePutError(0, "network"));
+    };
+    xhr.ontimeout = () => {
+      settle();
+      reject(new StoragePutError(0, "timeout"));
+    };
+    xhr.onabort = () => {
+      settle();
+      reject(abortError());
+    };
+    signal?.addEventListener("abort", onAbort, { once: true });
+    xhr.send(file);
+  });
+}
+
+async function putWithFetch(
+  sig: UploadSignature,
+  file: Blob,
+  onBytes: (sent: number, total: number) => void,
+  signal?: AbortSignal,
+): Promise<number> {
+  const controller = new AbortController();
+  let expired = false;
+  const timer = setTimeout(() => {
+    expired = true;
+    controller.abort();
+  }, UPLOAD_PUT_TIMEOUT_MS);
+  const relayAbort = () => controller.abort();
+  signal?.addEventListener("abort", relayAbort, { once: true });
+  try {
+    const response = await fetch(sig.upload_url, {
+      method: sig.method || "PUT",
+      headers: storageHeaders(sig.headers),
+      body: file,
+      credentials: "omit",
+      signal: controller.signal,
+    });
+    if (response.ok) onBytes(file.size, file.size);
+    return response.status;
+  } catch (e) {
+    if (expired) throw new StoragePutError(0, "timeout");
+    if (isAbortError(e)) throw e;
+    throw new StoragePutError(0, "network");
+  } finally {
+    clearTimeout(timer);
+    signal?.removeEventListener("abort", relayAbort);
+  }
+}
+
+/** sign → PUT → finalize for one file, through `runDirectUpload`'s rules.
+ *  `read` turns the finalize reply into the caller's shape; `multipart` is the
+ *  old route for the same file, used when the direct one is off or absent. */
+async function viaStorage<Raw, R extends object>(
+  surface: UploadSurface,
+  target: string,
+  file: File,
+  opts: DirectUploadOptions,
+  finalizeFields: Record<string, unknown>,
+  read: (raw: Raw) => R,
+  multipart: () => Promise<R>,
+): Promise<R & { route: UploadRoute }> {
+  const scope = surface === "logo" || surface === "font" || surface === "guidelines" || surface === "reference"
+    ? "brands"
+    : "runs";
+  const base = `/api/gd/${scope}/${encodeURIComponent(target)}/uploads`;
+  const { signal } = opts;
+  const { route, body } = await runDirectUpload<R>(
+    { surface, file, relayed: RELAYED, onProgress: opts.onProgress },
+    {
+      sign: () =>
+        postJson<UploadSignature>(
+          base,
+          { surface, content_type: file.type, size: file.size, file_name: file.name },
+          { signal },
+        ),
+      put: (sig, onBytes) => putToStorage(sig, file, onBytes, signal),
+      finalize: (ticket) =>
+        postJson<Raw>(`${base}/finalize`, { ticket, file_name: file.name, ...finalizeFields }, { signal }).then(read),
+      multipart,
+      finalizeQueue: opts.finalizeQueue,
+    },
+  );
+  return { ...body, route };
+}
+
+/** One Graphics Designer file, straight to storage — or, while the backend's
+ *  `GD_DIRECT_UPLOADS` is off (or the route is absent), up the old multipart
+ *  route when it fits. Rejects with an `UploadError` whose message is the
+ *  reason in words, or with the caller's `AbortError`. */
+export function directUpload(
+  surface: "reference", brandId: string, file: File, opts?: DirectUploadOptions,
+): Promise<GdReferenceUpload>;
+export function directUpload(
+  surface: GdBrandAssetKind, brandId: string, file: File, opts?: DirectUploadOptions,
+): Promise<GdBrandAssetUpload>;
+export function directUpload(
+  surface: RunUploadSurface, runId: string, file: File, opts?: DirectUploadOptions,
+): Promise<GdRunUpload>;
+export function directUpload(
+  surface: UploadSurface, target: string, file: File, opts: DirectUploadOptions = {},
+): Promise<GdReferenceUpload | GdBrandAssetUpload | GdRunUpload> {
+  if (surface === "reference") {
+    const meta = opts.meta ?? {};
+    return viaStorage(
+      surface, target, file, opts,
+      // What the multipart references route takes as form fields.
+      { kind: meta.kind ?? "creative", creative_type: meta.creative_type || null, note: meta.note ?? "" },
+      (r: { references?: RawBrandReference[]; reference_count?: number; upload?: unknown }) => {
+        const references = (r.references ?? []).map(brandReference).filter((x) => x.ref_id);
+        return {
+          references,
+          reference_count: r.reference_count ?? references.length,
+          upload: readUploadSummary(r.upload),
+        };
+      },
+      () =>
+        gdUploadBrandReferences(target, [file], {
+          kind: meta.kind,
+          creative_type: meta.creative_type || undefined,
+          note: meta.note || undefined,
+        }).then((r) => ({ ...r, upload: null })),
+    );
+  }
+  if (surface === "logo" || surface === "font" || surface === "guidelines") {
+    // `file_name` always goes with the ticket (see `viaStorage`): a font's
+    // face name is derived from it.
+    return viaStorage(
+      surface, target, file, opts, {},
+      (r: { brand: RawBrandDetail; upload?: unknown }) => ({
+        brand: brandDetail(r.brand),
+        upload: readUploadSummary(r.upload),
+      }),
+      () => gdUploadBrandAssets(target, surface, [file]).then((brand) => ({ brand, upload: null })),
+    );
+  }
+  const runSurface: RunUploadSurface = surface;
+  return viaStorage(
+    runSurface, target, file, opts, {},
+    (r: { ref?: string; role?: string; upload?: unknown }) => ({
+      ref: r.ref ?? "",
+      role: r.role ?? runSurface,
+      upload: readUploadSummary(r.upload),
+    }),
+    () =>
+      (runSurface === "element" ? gdElementUpload(target, file) : gdSubjectUpload(target, file, runSurface))
+        .then((r) => ({ ref: r.ref, role: runSurface, upload: null })),
+  );
 }
 
 /* ---------------- Creative Agent (brochures / decks / carousels / blogs) --- */

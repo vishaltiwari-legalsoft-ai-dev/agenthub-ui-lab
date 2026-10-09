@@ -19,10 +19,10 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import type { ToastFn } from "@/components/console/ConsoleApp";
 import type { Viewer } from "@/components/hub/model";
 import {
-  gdArchiveBrand, gdBrand, gdCreateBrand, gdDeleteBrandReference, gdPatchBrand,
-  gdUploadBrandAssets, gdUploadBrandReferences,
+  directUpload, gdArchiveBrand, gdBrand, gdCreateBrand, gdDeleteBrandReference, gdPatchBrand,
   type GdBrandDetail, type GdBrandReference, type GdBrandReferenceKind,
 } from "@/lib/api";
+import type { UploadRow } from "@/lib/directUpload";
 import { loadPending, useLoadSession, type Load } from "@/lib/load";
 import { Ic } from "@/components/hub/Sprite";
 import {
@@ -30,8 +30,18 @@ import {
   canArchiveBrand, checkFiles, describeBrandFailure, draftFrom, emptyDraft, emptyPending, formatMb,
   hasPending, normalizeHex, referenceCountLabel, referenceTypeLabel, referencesRemaining,
   saveBrandKit, validateDraft,
-  type BrandDraft, type ColorRole, type KitFileKind, type PendingUploads,
+  type BrandDraft, type BrandKitApi, type ColorRole, type KitFileKind, type PendingUploads,
 } from "./brandKit";
+import { UploadRows } from "./UploadRows";
+
+/** The sheet's uploads: every file straight to storage, one at a time each
+ *  (`directUpload`), with the multipart route as its fallback. */
+const KIT_API: BrandKitApi<File> = {
+  create: gdCreateBrand,
+  patch: gdPatchBrand,
+  uploadAsset: (brandId, kind, file, hooks) => directUpload(kind, brandId, file, hooks),
+  uploadReference: (brandId, file, meta, hooks) => directUpload("reference", brandId, file, { ...hooks, meta }),
+};
 
 const ROLE_LABEL: Record<ColorRole, string> = {
   primary: "Primary", secondary: "Secondary", accent: "Accent",
@@ -71,6 +81,9 @@ export function BrandKitSheet({
   const [pending, setPending] = useState<PendingUploads>(emptyPending);
   const [fontName, setFontName] = useState("");
   const [problems, setProblems] = useState<string[]>([]);
+  // One row per file of the last save — progress, then stored or the reason.
+  const [uploads, setUploads] = useState<UploadRow[]>([]);
+  const rowsRef = useRef<HTMLDivElement>(null);
   const [busy, setBusy] = useState(false);
   const [dropping, setDropping] = useState(false);
   const [removing, setRemoving] = useState<string | null>(null);
@@ -104,6 +117,7 @@ export function BrandKitSheet({
       setPending(emptyPending());
       setFontName("");
       setProblems([]);
+      setUploads([]);
       setConfirmArchive(false);
       setRemoving(null);
       el.showModal();
@@ -130,6 +144,14 @@ export function BrandKitSheet({
   useEffect(() => {
     if (loaded) setDraft(draftFrom(loaded));
   }, [loaded]);
+
+  // The rows sit under the whole form; bring them into view when a save
+  // starts sending files and again when it ends — the pickers hidden while
+  // it runs come back above them and would push the results out of sight.
+  const rowsStage = uploads.length === 0 ? "none" : busy ? "sending" : "done";
+  useEffect(() => {
+    if (rowsStage !== "none") rowsRef.current?.scrollIntoView({ block: "nearest" });
+  }, [rowsStage]);
 
   const creating = id === null;
   const brand = detail.data;
@@ -205,18 +227,9 @@ export function BrandKitSheet({
     }
     setBusy(true);
     setProblems([]);
+    setUploads([]);
     try {
-      const outcome = await saveBrandKit(
-        {
-          create: gdCreateBrand,
-          patch: gdPatchBrand,
-          uploadAssets: gdUploadBrandAssets,
-          uploadReferences: gdUploadBrandReferences,
-        },
-        id,
-        draft,
-        pending,
-      );
+      const outcome = await saveBrandKit(KIT_API, id, draft, pending, setUploads);
       if (!outcome.brand) {
         setProblems(outcome.problems);
         return;
@@ -225,18 +238,22 @@ export function BrandKitSheet({
       setId(saved.brand_id);
       setDetail({ phase: "ready", data: saved, error: null });
       setDraft(draftFrom(saved));
-      if (outcome.problems.length) {
-        // The brand is real; the sheet stays on it, keeping what did not land
-        // so the person can retry without picking it again.
+      const failedCount = Object.values(outcome.failed).reduce((n, list) => n + list.length, 0);
+      if (failedCount > 0) {
+        // The brand is real; the sheet stays on it with each file's reason in
+        // its row, keeping what did not land so a retry needs no re-pick.
+        const { failed } = outcome;
         setPending((p) => ({
           ...p,
-          logo: outcome.problems.some((m) => m.startsWith("The logo")) ? p.logo : [],
-          font: outcome.problems.some((m) => m.startsWith("The fonts")) ? p.font : [],
-          guidelines: outcome.problems.some((m) => m.startsWith("The guidelines")) ? p.guidelines : [],
-          reference: outcome.problems.some((m) => /references? did not upload/i.test(m)) ? p.reference : [],
+          logo: p.logo.filter((f) => failed.logo.includes(f)),
+          font: p.font.filter((f) => failed.font.includes(f)),
+          guidelines: p.guidelines.filter((f) => failed.guidelines.includes(f)),
+          reference: p.reference.filter((f) => failed.reference.includes(f)),
         }));
-        setProblems(outcome.problems);
-        onToast(creating ? "Brand created — some files did not upload." : "Brand saved — some files did not upload.", "warn");
+        onToast(
+          `${creating ? "Brand created" : "Brand saved"} — ${failedCount} file${failedCount === 1 ? "" : "s"} did not upload.`,
+          "warn",
+        );
         onSaved(saved);
         return;
       }
@@ -244,7 +261,9 @@ export function BrandKitSheet({
       dropPreviews();
       onToast(creating ? `${saved.name} is ready to design for.` : `${saved.name} saved.`, "ok");
       onSaved(saved);
-      onClose();
+      // A note about a stored file (colours converted, one page of three used)
+      // is worth reading, so the sheet stays open on its rows; otherwise done.
+      if (!outcome.rows.some((r) => r.notes.length > 0)) onClose();
     } finally {
       setBusy(false);
     }
@@ -496,7 +515,7 @@ export function BrandKitSheet({
                       )}
                     </div>
                   </div>
-                  <span className="hint">{FILE_RULES.logo.accepts}, up to {formatMb(FILE_RULES.logo.maxBytes)}.</span>
+                  <span className="hint">{FILE_RULES.logo.accepts}, up to {formatMb(FILE_RULES.logo.maxBytes)} (an SVG up to 5 MB).</span>
                 </fieldset>
 
                 <fieldset className="bk__set">
@@ -511,7 +530,9 @@ export function BrandKitSheet({
                     <div className="bk__doc">
                       <b>{guidelinesOnFile.name}</b>
                       {guidelinesOnFile.url
-                        ? <a href={guidelinesOnFile.url} target="_blank" rel="noreferrer">Open the PDF</a>
+                        // A direct upload's PDF link is the original as an
+                        // attachment, so it downloads rather than opens.
+                        ? <a href={guidelinesOnFile.url} target="_blank" rel="noreferrer">{guidelinesOnFile.original ? "Download the PDF" : "Open the PDF"}</a>
                         : <span>On file; no preview link right now.</span>}
                       {!disabled && <FilePick kind="guidelines" label="Replace" onFiles={(l) => takeFiles("guidelines", l)} />}
                     </div>
@@ -657,6 +678,10 @@ export function BrandKitSheet({
             </>
           )}
 
+          <div ref={rowsRef}>
+            <UploadRows rows={uploads} label="Files in this save" />
+          </div>
+
           {problems.length > 0 && (
             <ul className="bk__problems" role="alert">
               {problems.map((p, i) => <li key={`${i}-${p}`}>{p}</li>)}
@@ -679,7 +704,7 @@ export function BrandKitSheet({
             )}
             <span className="bk__spacer" />
             <button type="button" className="btn btn--quiet" disabled={busy} onClick={onClose}>
-              {readOnly ? "Close" : "Cancel"}
+              {readOnly || (uploads.length > 0 && !hasPending(pending)) ? "Close" : "Cancel"}
             </button>
             {!readOnly && (creating || brand) && (
               <button type="submit" className="btn btn--mark" disabled={disabled}>

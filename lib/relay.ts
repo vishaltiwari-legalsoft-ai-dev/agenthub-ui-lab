@@ -22,6 +22,13 @@
  *  The route now buffers the body (see there).
  */
 
+/** The largest request body the platform hands this relay: Vercel refuses
+ *  anything over 4.5 MB before the route runs (an HTML 413, never a `detail`).
+ *  Decimal, the conservative reading of "4.5 MB". A multipart upload that goes
+ *  through the relay is capped by this, whatever the backend route allows —
+ *  which is why GD files go to Cloud Storage directly (`directUpload.ts`). */
+export const RELAY_BODY_LIMIT_BYTES = 4_500_000;
+
 /** Request headers that describe this one hop rather than the request, so a
  *  proxy never passes them on (RFC 9110 §7.6.1). undici rejects several of
  *  them outright — `expect`, `transfer-encoding`, `upgrade`, `keep-alive` —

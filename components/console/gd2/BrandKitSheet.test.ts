@@ -10,6 +10,7 @@
 
 import { describe, expect, it } from "vitest";
 import type { GdBrandDetail, GdBrandInput, GdBrandReference, GdBrandSummary } from "@/lib/api";
+import type { UploadHooks, UploadRow, UploadSummary } from "../../../lib/directUpload";
 import {
   BRAND_HOLD_MS,
   BRAND_REFRESH_GAP_MS,
@@ -73,6 +74,20 @@ const brand = (over: Partial<GdBrandDetail> = {}): GdBrandDetail => ({
 
 const ref = (id: string): GdBrandReference => ({
   ref_id: id, url: `/r/${id}`, kind: "reference", creative_type: null, note: "", created_at: "2026-09-25T00:00:00Z",
+  original: null,
+});
+
+/** A refusal as `directUpload` rejects with it: the reason in words as the
+ *  message, the backend's code beside it (read structurally, like the sheet). */
+const refused = (words: string, code: string | null = null): Error =>
+  Object.assign(new Error(words), { code });
+
+/** Finalize's `upload`, as the backend sends it for a stored file. */
+const summary = (over: Partial<UploadSummary> = {}): UploadSummary => ({
+  surface: "logo", file: "mark.png", status: "stored", already_finalized: false, kind: "png", content_id: "md5",
+  original: { bytes: 10, width: 100, height: 100, pages: null, download_url: "https://storage.example/o?sig=1" },
+  working: { width: 100, height: 100, format: "png" }, pages_used: null, flags: [],
+  ...over,
 });
 
 /** An `ApiError` as `lib/api` throws it, without importing the module (vitest
@@ -88,9 +103,10 @@ const draft = (over: Partial<BrandDraft> = {}): BrandDraft => ({
   ...over,
 });
 
-/** A fake backend that records the order of every call. */
+/** A fake backend that records every call. Each upload is ONE file. */
 function fakeApi(over: Partial<BrandKitApi<FileLike>> = {}) {
   const calls: string[] = [];
+  let refCount = 0;
   const api: BrandKitApi<FileLike> = {
     create: async (body: GdBrandInput) => {
       calls.push(`create:${body.name}`);
@@ -100,13 +116,23 @@ function fakeApi(over: Partial<BrandKitApi<FileLike>> = {}) {
       calls.push(`patch:${id}:${body.name ?? ""}`);
       return brand({ brand_id: id, name: body.name ?? "Berry Virtual" });
     },
-    uploadAssets: async (id, kind, files) => {
-      calls.push(`assets:${id}:${kind}:${files.map((f) => f.name).join(",")}`);
-      return brand({ brand_id: id, logo_url: kind === "logo" ? "/logo.png" : null });
+    uploadAsset: async (id, kind, f) => {
+      calls.push(`asset:${id}:${kind}:${f.name}`);
+      return {
+        brand: brand({ brand_id: id, logo_url: kind === "logo" ? "/logo.png" : null }),
+        upload: summary({ surface: kind, file: f.name }),
+        route: "direct",
+      };
     },
-    uploadReferences: async (id, files, meta) => {
-      calls.push(`refs:${id}:${files.length}:${meta.kind ?? ""}:${meta.note ?? ""}`);
-      return { references: files.map((f, i) => ref(`${f.name}-${i}`)), reference_count: files.length };
+    uploadReference: async (id, f, meta) => {
+      calls.push(`ref:${id}:${f.name}:${meta.kind ?? ""}:${meta.note ?? ""}`);
+      refCount += 1;
+      return {
+        references: [ref(f.name)],
+        reference_count: refCount,
+        upload: summary({ surface: "reference", file: f.name }),
+        route: "direct",
+      };
     },
     ...over,
   };
@@ -116,18 +142,28 @@ function fakeApi(over: Partial<BrandKitApi<FileLike>> = {}) {
 /* ----------------------------------------------------- client-side rules -- */
 
 describe("checkFiles — the limits the backend enforces, applied before sending", () => {
-  it("accepts a logo of an allowed type under 5 MB and refuses one over it", () => {
-    const ok = file("mark.png", 4 * MB, "image/png");
-    const big = file("mark-hires.png", 5 * MB + 1, "image/png");
+  it("takes a raster logo up to the direct upload's 50 MB — the old 5 MB check is gone — and refuses one over it", () => {
+    const ok = file("mark.png", 50 * MB, "image/png");
+    const big = file("mark-hires.png", 50 * MB + 1, "image/png");
     const r = checkFiles("logo", [ok, big]);
     expect(r.accepted).toEqual([ok]);
-    expect(r.rejected).toEqual([{ file: big, reason: "File too large (max 5 MB)" }]);
+    expect(r.rejected).toEqual([{ file: big, reason: "File too large (max 50 MB)" }]);
+  });
+
+  it("holds an SVG logo to its own 5 MB", () => {
+    expect(checkFiles("logo", [file("mark.svg", 5 * MB, "image/svg+xml")]).accepted).toHaveLength(1);
+    expect(checkFiles("logo", [file("mark.svg", 5 * MB + 1)]).rejected[0].reason).toBe("File too large (max 5 MB)");
+  });
+
+  it("takes a TIFF logo or reference — the direct upload reads it", () => {
+    expect(checkFiles("logo", [file("mark.tif", MB)]).accepted).toHaveLength(1);
+    expect(checkFiles("reference", [file("shoot.tiff", 48 * MB, "image/tiff")]).accepted).toHaveLength(1);
   });
 
   it("refuses a logo of the wrong type and says which types would do", () => {
     const r = checkFiles("logo", [file("mark.gif", 10, "image/gif")]);
     expect(r.accepted).toEqual([]);
-    expect(r.rejected[0].reason).toBe("Not a PNG, SVG, WebP or JPEG file");
+    expect(r.rejected[0].reason).toBe("Not a PNG, SVG, WebP, JPEG or TIFF file");
   });
 
   it("judges fonts by extension, because browsers report their MIME type inconsistently", () => {
@@ -147,19 +183,19 @@ describe("checkFiles — the limits the backend enforces, applied before sending
     expect(r.rejected[0].reason).toBe("File too large (max 2 MB)");
   });
 
-  it("takes one PDF up to 20 MB as guidelines and nothing else", () => {
-    const r = checkFiles("guidelines", [file("guide.pdf", 20 * MB, "application/pdf"), file("guide.docx", 10)]);
+  it("takes one PDF up to 50 MB as guidelines and nothing else", () => {
+    const r = checkFiles("guidelines", [file("guide.pdf", 50 * MB, "application/pdf"), file("guide.docx", 10)]);
     expect(r.accepted.map((f) => f.name)).toEqual(["guide.pdf"]);
     expect(r.rejected[0].reason).toBe("Not a PDF file");
-    expect(checkFiles("guidelines", [file("g.pdf", 20 * MB + 1)]).rejected[0].reason).toBe("File too large (max 20 MB)");
+    expect(checkFiles("guidelines", [file("g.pdf", 50 * MB + 1)]).rejected[0].reason).toBe("File too large (max 50 MB)");
   });
 
-  it("takes at most 10 references per upload, each under 10 MB", () => {
-    const eleven = Array.from({ length: 11 }, (_, i) => file(`ref-${i}.jpg`, MB, "image/jpeg"));
+  it("takes at most 10 references per pick, each up to 50 MB — a 50 MB image is not blocked here", () => {
+    const eleven = Array.from({ length: 11 }, (_, i) => file(`ref-${i}.jpg`, 50 * MB, "image/jpeg"));
     const r = checkFiles("reference", eleven);
     expect(r.accepted).toHaveLength(REFERENCE_BATCH);
     expect(r.rejected).toEqual([{ file: eleven[10], reason: "Only 10 files per upload" }]);
-    expect(checkFiles("reference", [file("big.webp", 10 * MB + 1)]).rejected[0].reason).toBe("File too large (max 10 MB)");
+    expect(checkFiles("reference", [file("big.webp", 50 * MB + 1)]).rejected[0].reason).toBe("File too large (max 50 MB)");
   });
 });
 
@@ -227,8 +263,11 @@ describe("toInput / draftFrom", () => {
 
 /* -------------------------------------------------------------- the save -- */
 
-describe("saveBrandKit — JSON first, then every file against the returned id", () => {
-  it("creates the brand, then uploads logo, fonts, guidelines and references to its new id, in that order", async () => {
+/** Rows as the save reported them last, by file name. */
+const byName = (rows: UploadRow[]): Record<string, UploadRow> => Object.fromEntries(rows.map((r) => [r.name, r]));
+
+describe("saveBrandKit — JSON first, then every file on its own against the returned id", () => {
+  it("creates the brand, then sends each logo, font, guidelines PDF and reference to its new id as its own upload", async () => {
     const { api, calls } = fakeApi();
     const pending = emptyPending<FileLike>();
     pending.logo = [file("mark.png", 10)];
@@ -240,17 +279,24 @@ describe("saveBrandKit — JSON first, then every file against the returned id",
 
     const out = await saveBrandKit(api, null, draft(), pending);
 
-    expect(calls).toEqual([
-      "create:Berry Virtual",
-      "assets:b_new:logo:mark.png",
-      "assets:b_new:font:Archivo.ttf,Archivo-Bold.ttf",
-      "assets:b_new:guidelines:guide.pdf",
-      "refs:b_new:2:creative:the layout",
+    expect(calls[0]).toBe("create:Berry Virtual");
+    expect(calls.slice(1).sort()).toEqual([
+      "asset:b_new:font:Archivo-Bold.ttf",
+      "asset:b_new:font:Archivo.ttf",
+      "asset:b_new:guidelines:guide.pdf",
+      "asset:b_new:logo:mark.png",
+      "ref:b_new:r1.jpg:creative:the layout",
+      "ref:b_new:r2.jpg:creative:the layout",
     ]);
     expect(out.problems).toEqual([]);
     expect(out.brand?.brand_id).toBe("b_new");
-    expect(out.brand?.references).toHaveLength(2);
+    expect(out.brand?.references.map((r) => r.ref_id).sort()).toEqual(["r1.jpg", "r2.jpg"]);
     expect(out.brand?.reference_count).toBe(2);
+    expect(out.rows.map((r) => [r.name, r.phase])).toEqual([
+      ["mark.png", "stored"], ["Archivo.ttf", "stored"], ["Archivo-Bold.ttf", "stored"],
+      ["guide.pdf", "stored"], ["r1.jpg", "stored"], ["r2.jpg", "stored"],
+    ]);
+    expect(out.failed).toEqual({ logo: [], font: [], guidelines: [], reference: [] });
   });
 
   it("patches an existing brand rather than creating a second one", async () => {
@@ -262,18 +308,19 @@ describe("saveBrandKit — JSON first, then every file against the returned id",
 
   it("sends nothing but the JSON when there is nothing to upload", async () => {
     const { api, calls } = fakeApi();
-    await saveBrandKit(api, null, draft(), emptyPending<FileLike>());
+    const out = await saveBrandKit(api, null, draft(), emptyPending<FileLike>());
     expect(calls).toEqual(["create:Berry Virtual"]);
+    expect(out.rows).toEqual([]);
   });
 
-  it("splits more than ten references into requests of ten", async () => {
+  it("sends every reference as its own upload — 23 files are 23 uploads with 23 rows, not batches of ten", async () => {
     const { api, calls } = fakeApi();
     const pending = emptyPending<FileLike>();
     pending.reference = Array.from({ length: 23 }, (_, i) => file(`r${i}.png`, 10));
     const out = await saveBrandKit(api, "b_old", draft(), pending);
-    expect(calls.filter((c) => c.startsWith("refs:"))).toEqual([
-      "refs:b_old:10:creative:", "refs:b_old:10:creative:", "refs:b_old:3:creative:",
-    ]);
+    expect(calls.filter((c) => c.startsWith("ref:"))).toHaveLength(23);
+    expect(out.rows).toHaveLength(23);
+    expect(out.rows.every((r) => r.phase === "stored")).toBe(true);
     expect(out.brand?.references).toHaveLength(23);
   });
 
@@ -287,39 +334,125 @@ describe("saveBrandKit — JSON first, then every file against the returned id",
     expect(calls).toEqual([]);
     expect(out.brand).toBeNull();
     expect(out.problems).toEqual(["A brand with this name already exists."]);
+    expect(out.rows).toEqual([]);
   });
 
-  it("keeps a brand that was created even when one of its uploads is refused, and names the one that failed", async () => {
+  it("keeps a brand that was created when one file is refused, shows that file's reason on its own row, and keeps the file for a retry", async () => {
+    const odd = file("odd.ttf", 10);
+    const words = "This file type is not accepted for a font upload — use TTF or OTF.";
     const { api, calls } = fakeApi({
-      uploadAssets: async (id, kind) => {
-        calls.push(`assets:${id}:${kind}`);
-        if (kind === "font") throw apiError("unsupported_file_type", 415);
-        return brand({ brand_id: id });
+      uploadAsset: async (id, kind, f) => {
+        calls.push(`asset:${id}:${kind}:${f.name}`);
+        if (kind === "font") throw refused(words, "unsupported_file_type");
+        return { brand: brand({ brand_id: id }), upload: null, route: "direct" };
       },
     });
     const pending = emptyPending<FileLike>();
     pending.logo = [file("mark.png", 10)];
-    pending.font = [file("odd.ttf", 10)];
+    pending.font = [odd];
     pending.reference = [file("r.png", 10)];
     const out = await saveBrandKit(api, null, draft(), pending);
     expect(out.brand?.brand_id).toBe("b_new");
-    expect(out.problems).toEqual(["The fonts did not upload: Font must be TTF or OTF under 2 MB."]);
-    // The refusal of one upload did not stop the ones after it.
-    expect(calls).toEqual(["create:Berry Virtual", "assets:b_new:logo", "assets:b_new:font", "refs:b_new:1:creative:"]);
+    expect(out.problems).toEqual([]);
+    const rows = byName(out.rows);
+    expect(rows["odd.ttf"].phase).toBe("failed");
+    expect(rows["odd.ttf"].reason).toBe(words);
+    expect(rows["mark.png"].phase).toBe("stored");
+    expect(rows["r.png"].phase).toBe("stored");
+    // The refusal of one file did not stop the ones after it.
+    expect(calls).toContain("ref:b_new:r.png:creative:");
+    expect(out.failed).toEqual({ logo: [], font: [odd], guidelines: [], reference: [] });
   });
 
-  it("stops sending references once the cap is reached", async () => {
+  it("once the reference cap comes back, fails every reference not yet sent with the same reason — none is dropped silently", async () => {
+    const cap = "This brand already holds as many references as it can.";
     const { api, calls } = fakeApi({
-      uploadReferences: async (id, files) => {
-        calls.push(`refs:${id}:${files.length}`);
-        throw apiError("reference_cap_reached", 409);
+      uploadReference: async (id, f) => {
+        calls.push(`ref:${id}:${f.name}`);
+        throw refused(cap, "reference_cap_reached");
       },
     });
     const pending = emptyPending<FileLike>();
     pending.reference = Array.from({ length: 25 }, (_, i) => file(`r${i}.png`, 10));
     const out = await saveBrandKit(api, "b_old", draft(), pending);
-    expect(calls).toEqual(["patch:b_old:Berry Virtual", "refs:b_old:10"]);
-    expect(out.problems).toEqual(["References 1–10 did not upload: This brand already holds as many references as it can."]);
+    // Only the three already sending when the cap came back went out.
+    expect(calls.filter((c) => c.startsWith("ref:"))).toHaveLength(3);
+    expect(out.rows).toHaveLength(25);
+    for (const row of out.rows) {
+      expect(row.phase).toBe("failed");
+      expect(row.reason).toBe(cap);
+    }
+    expect(out.failed.reference).toHaveLength(25);
+  });
+
+  it("stops every later file, of any kind, once the brand itself is gone", async () => {
+    const gone = "This brand no longer exists — it may have been archived.";
+    const { api, calls } = fakeApi({
+      uploadAsset: async (id, kind, f) => {
+        calls.push(`asset:${id}:${kind}:${f.name}`);
+        throw refused(gone, "brand_not_found");
+      },
+    });
+    const pending = emptyPending<FileLike>();
+    pending.logo = ["a.png", "b.png", "c.png", "d.png"].map((n) => file(n, 10));
+    pending.reference = [file("r.png", 10)];
+    const out = await saveBrandKit(api, "b_old", draft(), pending);
+    expect(calls.filter((c) => c.startsWith("asset:") || c.startsWith("ref:"))).toHaveLength(3);
+    expect(out.rows.map((r) => r.reason)).toEqual(Array(5).fill(gone));
+  });
+
+  it("sends at most three files at once and finalizes them one at a time", async () => {
+    let sending = 0;
+    let maxSending = 0;
+    let finalizing = 0;
+    let maxFinalizing = 0;
+    const tick = () => new Promise<void>((r) => setTimeout(r, 0));
+    const { api } = fakeApi({
+      uploadReference: async (_id, f, _meta, hooks: UploadHooks) => {
+        sending += 1;
+        maxSending = Math.max(maxSending, sending);
+        await tick();
+        sending -= 1;
+        await hooks.finalizeQueue(async () => {
+          finalizing += 1;
+          maxFinalizing = Math.max(maxFinalizing, finalizing);
+          await tick();
+          await tick();
+          finalizing -= 1;
+        });
+        return { references: [ref(f.name)], reference_count: 1, upload: null, route: "direct" };
+      },
+    });
+    const pending = emptyPending<FileLike>();
+    pending.reference = Array.from({ length: 8 }, (_, i) => file(`r${i}.png`, 10));
+    const out = await saveBrandKit(api, "b_old", draft(), pending);
+    expect(out.rows.every((r) => r.phase === "stored")).toBe(true);
+    expect(maxSending).toBe(3);
+    expect(maxFinalizing).toBe(1);
+  });
+
+  it("shows each file's progress, then a calm note for anything the server changed on the way in", async () => {
+    const seen: UploadRow[][] = [];
+    const { api } = fakeApi({
+      uploadAsset: async (id, _kind, _f, hooks) => {
+        hooks.onProgress({ phase: "sending", route: "direct", sent: 5, total: 10 });
+        return {
+          brand: brand({ brand_id: id }),
+          upload: summary({ flags: ["color_converted_without_profile"], pages_used: "1 of 3" }),
+          route: "direct",
+        };
+      },
+    });
+    const pending = emptyPending<FileLike>();
+    pending.logo = [file("mark.tif", 10)];
+    const out = await saveBrandKit(api, "b_old", draft(), pending, (rows) => seen.push(rows));
+    expect(seen.some((rows) => rows[0].phase === "sending" && rows[0].sent === 5)).toBe(true);
+    expect(out.rows[0].phase).toBe("stored");
+    expect(out.rows[0].notes).toEqual([
+      "Colours were converted without a colour profile, so they may look slightly different.",
+      "Only page 1 of 3 is used.",
+    ]);
+    expect(out.rows[0].downloadUrl).toBe("https://storage.example/o?sig=1");
   });
 });
 
@@ -333,17 +466,9 @@ describe("describeBrandFailure — the backend's detail, in words", () => {
     expect(describeBrandFailure(apiError("reference_cap_reached", 409), "x")).toBe("This brand already holds as many references as it can.");
   });
 
-  it("names the limit of the upload that was refused when the caller says which one", () => {
-    expect(describeBrandFailure(apiError("file_too_large", 413), "x", "logo")).toBe("Logo must be PNG, SVG, WebP or JPEG under 5 MB.");
-    expect(describeBrandFailure(apiError("unsupported_file_type", 415), "x", "logo")).toBe("Logo must be PNG, SVG, WebP or JPEG under 5 MB.");
-    expect(describeBrandFailure(apiError("file_too_large", 413), "x", "font")).toBe("Font must be TTF or OTF under 2 MB.");
-    expect(describeBrandFailure(apiError("unsupported_file_type", 415), "x", "guidelines")).toBe("Guidelines PDF must be PDF under 20 MB.");
-    expect(describeBrandFailure(apiError("file_too_large", 413), "x", "reference")).toBe("Reference image must be PNG, JPEG or WebP under 10 MB.");
-    expect(describeBrandFailure(apiError("too_many_files", 422), "x", "reference")).toBe("Only 10 references per upload.");
-    expect(describeBrandFailure(apiError("too_many_files", 422), "x", "font")).toBe("Only 16 font files per upload.");
-  });
-
-  it("still speaks plainly when the kind is unknown", () => {
+  // A file that did not upload is worded per file by lib/directUpload.ts
+  // (requestPolicy.test.ts pins those words); these are the brand-level ones.
+  it("speaks plainly about a file code that reaches a brand-level call", () => {
     expect(describeBrandFailure(apiError("file_too_large", 413), "x")).toBe("The file is larger than the upload limit.");
     expect(describeBrandFailure(apiError("unsupported_file_type", 415), "x")).toBe("That file type is not accepted.");
     expect(describeBrandFailure(apiError("too_many_files", 422), "x")).toBe("Too many files in one upload.");
@@ -352,10 +477,10 @@ describe("describeBrandFailure — the backend's detail, in words", () => {
   });
 
   it("names the pixel and count limits the backend added", () => {
-    expect(describeBrandFailure(apiError("image_too_large", 422), "x", "logo"))
+    expect(describeBrandFailure(apiError("image_too_large", 422), "x"))
       .toBe("Image is larger than 4096 px on a side (or an SVG with an embedded image) — please resize it.");
-    expect(describeBrandFailure(apiError("logo_limit_reached", 409), "x", "logo")).toBe("This brand already has 8 logos — remove one first.");
-    expect(describeBrandFailure(apiError("font_limit_reached", 409), "x", "font")).toBe("This brand already has 16 font files — remove one first.");
+    expect(describeBrandFailure(apiError("logo_limit_reached", 409), "x")).toBe("This brand already has 8 logos — remove one first.");
+    expect(describeBrandFailure(apiError("font_limit_reached", 409), "x")).toBe("This brand already has 16 font files — remove one first.");
   });
 
   it("says what a 413 / 415 / 422 with no detail means — an edge in front of the backend, not the backend — and keeps a sentence the backend wrote", () => {
@@ -470,29 +595,33 @@ describe("reference uploads — kind and type", () => {
 });
 
 describe("saveBrandKit — a create that lands but whose uploads all fail is still a create", () => {
-  it("returns the created brand with one problem per failed upload, in upload order", async () => {
+  it("returns the created brand with each file's own reason, in the order they were sent", async () => {
+    const tooBig = "The file is 61.0 MB; the limit here is 50 MB.";
+    const heic = "HEIC/HEIF and AVIF images are not supported — export as JPEG/PNG. Accepted here: PNG, JPEG, WebP or TIFF.";
     const { api, calls } = fakeApi({
-      uploadAssets: async (id, kind) => {
-        calls.push(`assets:${id}:${kind}`);
-        throw apiError("file_too_large", 413);
+      uploadAsset: async (id, kind, f) => {
+        calls.push(`asset:${id}:${kind}:${f.name}`);
+        throw refused(tooBig, "file_too_large");
       },
-      uploadReferences: async (id, files) => {
-        calls.push(`refs:${id}:${files.length}`);
-        throw apiError("unsupported_file_type", 415);
+      uploadReference: async (id, f) => {
+        calls.push(`ref:${id}:${f.name}`);
+        throw refused(heic, "unsupported_file_type");
       },
     });
     const pending = emptyPending<FileLike>();
     pending.logo = [file("mark.png", 10)];
     pending.guidelines = [file("g.pdf", 10)];
-    pending.reference = [file("r.png", 10)];
+    pending.reference = [file("r.heic", 10)];
     const out = await saveBrandKit(api, null, draft(), pending);
     expect(out.brand?.brand_id).toBe("b_new");
-    expect(out.problems).toEqual([
-      "The logo did not upload: Logo must be PNG, SVG, WebP or JPEG under 5 MB.",
-      "The guidelines did not upload: Guidelines PDF must be PDF under 20 MB.",
-      "The references did not upload: Reference image must be PNG, JPEG or WebP under 10 MB.",
+    expect(out.problems).toEqual([]);
+    expect(out.rows.map((r) => [r.name, r.phase, r.reason])).toEqual([
+      ["mark.png", "failed", tooBig],
+      ["g.pdf", "failed", tooBig],
+      ["r.heic", "failed", heic],
     ]);
-    expect(calls).toEqual(["create:Berry Virtual", "assets:b_new:logo", "assets:b_new:guidelines", "refs:b_new:1"]);
+    expect(calls[0]).toBe("create:Berry Virtual");
+    expect(calls.slice(1).sort()).toEqual(["asset:b_new:guidelines:g.pdf", "asset:b_new:logo:mark.png", "ref:b_new:r.heic"]);
   });
 
   it("keeps the brand the PATCH returned when nothing was uploaded, so the sheet shows the server's copy", async () => {

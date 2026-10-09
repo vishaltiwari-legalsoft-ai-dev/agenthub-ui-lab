@@ -621,6 +621,43 @@
 .bk__problems li { font-size: 12px; line-height: 1.5; color: var(--fg); }
 .bk__problems li + li { margin-top: 4px; }
 
+/* ---------- per-file upload rows (components/console/gd2/UploadRows.tsx) ---------- */
+/* One line per file: the accent bar while it moves, the quiet ok ink once it
+   is stored, the failure tone only for a file that did not upload. Notes are
+   plain secondary text. The studio maps the --upl-* layer to its own tokens
+   in gd2.css; nothing here is a literal colour. */
+.upl {
+  --upl-fg: var(--fg);
+  --upl-soft: var(--fg-2);
+  --upl-line: var(--rule);
+  --upl-well: var(--surface-2);
+  --upl-bar: var(--mark);
+  --upl-ok: var(--ok);
+  --upl-bad: var(--gap);
+  list-style: none; margin: var(--s3) 0 0; padding: 0; display: grid; gap: var(--s2);
+}
+.upl__row { min-width: 0; padding: var(--s2) var(--s3); border: 1px solid var(--upl-line); border-radius: var(--r-ctl); background: var(--upl-well); }
+.upl__row.is-failed { border-left: 3px solid var(--upl-bad); }
+.upl__head { display: flex; align-items: baseline; justify-content: space-between; gap: var(--s3); min-width: 0; }
+.upl__name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; font-weight: 650; color: var(--upl-fg); }
+.upl__state { flex: 0 0 auto; font-size: 11px; font-variant-numeric: tabular-nums; color: var(--upl-soft); }
+.upl__row.is-stored .upl__state { color: var(--upl-ok); font-weight: 650; }
+.upl__row.is-failed .upl__state { color: var(--upl-bad); font-weight: 650; }
+.upl__bar { position: relative; height: 4px; margin-top: 6px; border-radius: var(--r-pill); background: var(--upl-line); overflow: hidden; }
+.upl__bar i { display: block; height: 100%; width: 0; background: var(--upl-bar); transition: width var(--t-fast) linear; }
+/* A step with no measure (preparing, checking, the old route): a slow sweep. */
+.upl__bar.is-open i { width: 30%; animation: upl-sweep 1.4s var(--ease) infinite; }
+@keyframes upl-sweep { from { transform: translateX(-100%); } to { transform: translateX(340%); } }
+.upl__why, .upl__note { margin: 4px 0 0; font-size: 12px; line-height: 1.5; }
+.upl__why { color: var(--upl-fg); }
+.upl__note { color: var(--upl-soft); }
+.upl__link { display: inline-block; margin-top: 4px; padding: 0; font-size: 12px; color: var(--upl-fg); text-decoration: underline; text-underline-offset: 2px; background: none; border: 0; cursor: pointer; }
+.upl__link:focus-visible { outline: 2px solid var(--upl-fg); outline-offset: 2px; border-radius: var(--r-mark); }
+.upl__link:disabled { cursor: wait; color: var(--upl-soft); }
+@media (prefers-reduced-motion: reduce) {
+  .upl__bar.is-open i { animation: none; width: 100%; opacity: 0.45; }
+}
+
 /* the closing row: archive (admins, edit only) far left, then cancel + the one primary */
 .bk__actions { align-items: center; flex-wrap: wrap; }
 .bk__spacer { flex: 1 1 auto; }

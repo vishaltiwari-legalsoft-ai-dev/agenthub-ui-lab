@@ -13,10 +13,13 @@ import type { AddressInfo } from "node:net";
 import type { NextRequest } from "next/server";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import {
+  ApiError,
   apiStatus,
   creativeGenerate,
   creativeGet,
+  directUpload,
   gdArtifactBlob,
+  gdBrand,
   getDbCollections,
   isAbortError,
   mrDeleteDataset,
@@ -25,8 +28,10 @@ import {
   seoAnalyzeSite,
   seoBrandDetail,
   seoSetCompetitors,
+  setAuthToken,
   setUnauthorizedHandler,
 } from "./api";
+import { UploadError } from "./directUpload";
 import { DEFAULT_TIMEOUT_MS, isUnanswered, SLOW_TIMEOUT_MS } from "./requestPolicy";
 import { downstreamHeaders, upstreamHeaders } from "./relay";
 
@@ -554,5 +559,284 @@ describe("the relay passes large request bodies through intact", () => {
     expect(back.has("content-encoding")).toBe(false);
     expect(back.has("content-length")).toBe(false);
     expect(back.get("content-type")).toBe("application/pdf");
+  });
+});
+
+/* ------------------------------------------- direct uploads to storage -- */
+/* The real `directUpload` against a stubbed backend: `fetch` answers the API
+   by method and path, and a fake XHR stands in for the browser's PUT to
+   Cloud Storage, so what actually goes on the wire is what is checked. */
+
+type Route = (url: string, init: RequestInit) => Response;
+
+const json = (body: unknown, status = 200, headers: Record<string, string> = {}): Route => () =>
+  new Response(JSON.stringify(body), { status, headers: { "Content-Type": "application/json", ...headers } });
+
+/** The API (and, without XHR, storage) as `fetch` sees them. A route given a
+ *  list answers with each in turn; an unknown route is FastAPI's 404. */
+function stubBackend(routes: Record<string, Route | Route[]>) {
+  const calls: { key: string; url: string; init: RequestInit }[] = [];
+  const seen: Record<string, number> = {};
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async (url: string, init: RequestInit = {}) => {
+      const key = `${(init.method ?? "GET").toUpperCase()} ${url.replace(/^https?:\/\/[^/]+/, "").split("?")[0]}`;
+      calls.push({ key, url, init });
+      const route = routes[key];
+      if (!route) return new Response(JSON.stringify({ detail: "Not Found" }), { status: 404 });
+      const list = Array.isArray(route) ? route : [route];
+      const i = (seen[key] = (seen[key] ?? -1) + 1);
+      return list[Math.min(i, list.length - 1)](url, init);
+    }),
+  );
+  return { calls, count: (key: string) => calls.filter((c) => c.key === key).length };
+}
+
+/** The browser's XHR, recording what the PUT carried. */
+class FakeXhr {
+  static made: FakeXhr[] = [];
+  static answers: number[] = [];
+  method = "";
+  url = "";
+  headers: Record<string, string> = {};
+  body: unknown = null;
+  withCredentials = true; // the code under test must turn it off
+  timeout = 0;
+  status = 0;
+  upload: { onprogress: ((e: { loaded: number; total: number; lengthComputable: boolean }) => void) | null } = { onprogress: null };
+  onload: (() => void) | null = null;
+  onerror: (() => void) | null = null;
+  ontimeout: (() => void) | null = null;
+  onabort: (() => void) | null = null;
+  constructor() {
+    FakeXhr.made.push(this);
+  }
+  open(method: string, url: string) {
+    this.method = method;
+    this.url = url;
+  }
+  setRequestHeader(name: string, value: string) {
+    this.headers[name] = value;
+  }
+  send(body: unknown) {
+    this.body = body;
+    queueMicrotask(() => {
+      this.upload.onprogress?.({ loaded: 4, total: 10, lengthComputable: true });
+      this.status = FakeXhr.answers.shift() ?? 200;
+      this.onload?.();
+    });
+  }
+  abort() {
+    this.onabort?.();
+  }
+}
+
+const signed = (ticket: string, contentType = "image/jpeg") => ({
+  surface: "reference",
+  upload_url: `https://storage.example/uploads/pending/${ticket}?X-Goog-Signature=abc`,
+  method: "PUT",
+  // As the staging backend really answers (2026-10-09): the storage library
+  // adds `Host` to the headers it signs. The browser sends its own.
+  headers: {
+    "Content-Type": contentType, "x-goog-content-length-range": "1,52428800", "x-goog-if-generation-match": "0",
+    Host: "storage.googleapis.com",
+  },
+  max_bytes: 52428800,
+  expires_at: "2026-10-09T10:10:00+00:00",
+  ticket,
+  ticket_expires_at: "2026-10-09T11:00:00+00:00",
+});
+
+const stored = (surface: string) => ({
+  surface, file: "x", status: "stored", already_finalized: false, kind: "jpeg", content_id: "md5",
+  original: { bytes: 10, width: 8000, height: 6000, pages: null, download_url: "https://storage.example/dl?sig=1" },
+  working: { width: 4096, height: 3072, format: "jpeg" }, pages_used: null, flags: ["color_converted_without_profile"],
+});
+
+const jpeg = (bytes = 10, name = "shoot.jpg") => new File([new Uint8Array(bytes)], name, { type: "image/jpeg" });
+
+describe("direct uploads to storage", () => {
+  afterEach(() => {
+    FakeXhr.made = [];
+    FakeXhr.answers = [];
+    setAuthToken(null);
+  });
+
+  it("PUTs the file straight to storage with exactly the signed headers — no app token, no cookies — and finalizes with the ticket", async () => {
+    setAuthToken("app-jwt");
+    const sig = signed("tkt-1");
+    const api = stubBackend({
+      "POST /api/gd/brands/b1/uploads": json(sig),
+      "POST /api/gd/brands/b1/uploads/finalize": json({
+        references: [{ ref_id: "r1", url: "https://view.example/r1", kind: "creative", note: "the palette", created_at: "x" }],
+        reference_count: 4,
+        upload: stored("reference"),
+      }),
+    });
+    vi.stubGlobal("XMLHttpRequest", FakeXhr);
+    const file = jpeg();
+    const sent: number[] = [];
+
+    const out = await directUpload("reference", "b1", file, {
+      meta: { kind: "creative", creative_type: "newsletter", note: "the palette" },
+      onProgress: (p) => { if (p.phase === "sending") sent.push(p.sent); },
+    });
+
+    const [xhr] = FakeXhr.made;
+    expect(FakeXhr.made).toHaveLength(1);
+    expect(xhr.method).toBe("PUT");
+    expect(xhr.url).toBe(sig.upload_url);
+    // Every signed header exactly — nothing added (no Authorization), no
+    // x-goog-* altered — less only the Host a page may not set.
+    expect(xhr.headers).toEqual({
+      "Content-Type": "image/jpeg", "x-goog-content-length-range": "1,52428800", "x-goog-if-generation-match": "0",
+    });
+    expect(xhr.withCredentials).toBe(false);
+    expect(xhr.body).toBe(file); // the raw File, not FormData
+    expect(xhr.timeout).toBe(600_000);
+    expect(sent).toContain(4);
+
+    // Only the API went over fetch, and it carried the session.
+    expect(api.calls.map((c) => c.key)).toEqual(["POST /api/gd/brands/b1/uploads", "POST /api/gd/brands/b1/uploads/finalize"]);
+    for (const c of api.calls) expect(new Headers(c.init.headers).get("Authorization")).toBe("Bearer app-jwt");
+    expect(JSON.parse(String(api.calls[0].init.body))).toEqual({
+      surface: "reference", content_type: "image/jpeg", size: 10, file_name: "shoot.jpg",
+    });
+    expect(JSON.parse(String(api.calls[1].init.body))).toEqual({
+      ticket: "tkt-1", file_name: "shoot.jpg", kind: "creative", creative_type: "newsletter", note: "the palette",
+    });
+
+    expect(out.route).toBe("direct");
+    expect(out.reference_count).toBe(4);
+    expect(out.references[0]).toMatchObject({ ref_id: "r1", original: null }); // read with a default
+    expect(out.upload?.original.download_url).toBe("https://storage.example/dl?sig=1");
+    expect(out.upload?.flags).toEqual(["color_converted_without_profile"]);
+  });
+
+  it("finalizes a font with its real file name — the face name is derived from it", async () => {
+    stubBackend({
+      "POST /api/gd/brands/b1/uploads": json(signed("tkt-f", "font/ttf")),
+      "POST /api/gd/brands/b1/uploads/finalize": (_u, init) => {
+        expect(JSON.parse(String(init.body))).toEqual({ ticket: "tkt-f", file_name: "Archivo-Bold.ttf" });
+        return json({ brand: { brand_id: "b1", name: "Berry", assets: { fonts: [{ path: "brands/b1/originals/x.ttf", url: "https://dl" }] } }, upload: stored("font") })(_u, init);
+      },
+    });
+    vi.stubGlobal("XMLHttpRequest", FakeXhr);
+    const out = await directUpload("font", "b1", new File([new Uint8Array(4)], "Archivo-Bold.ttf", { type: "" }));
+    expect(out.brand.assets.fonts[0]).toEqual({ path: "brands/b1/originals/x.ttf", url: "https://dl", name: "x.ttf", original: null });
+    expect(FakeXhr.made[0].headers["Content-Type"]).toBe("font/ttf");
+  });
+
+  it("falls back to the multipart route while the backend has direct uploads off", async () => {
+    const api = stubBackend({
+      "POST /api/gd/runs/r1/uploads": json({ detail: { code: "direct_uploads_disabled", message: "Direct uploads are switched off on this deployment — use the regular upload." } }, 503),
+      "POST /api/gd/runs/r1/subject/upload": json({ ref: "s-abc.png", role: "subject" }),
+    });
+    vi.stubGlobal("XMLHttpRequest", FakeXhr);
+
+    const out = await directUpload("subject", "r1", jpeg(2048));
+
+    expect(out).toEqual({ ref: "s-abc.png", role: "subject", upload: null, route: "multipart" });
+    expect(FakeXhr.made).toHaveLength(0);
+    const mp = api.calls.find((c) => c.key === "POST /api/gd/runs/r1/subject/upload");
+    expect(mp?.url).toContain("role=subject");
+    expect(mp?.init.body).toBeInstanceOf(FormData);
+  });
+
+  it("falls back when an older backend has no sign route at all", async () => {
+    const api = stubBackend({
+      "POST /api/gd/brands/b1/assets": json({ brand: { brand_id: "b1", name: "Berry", logo_url: "https://view/logo.png" } }),
+    });
+    vi.stubGlobal("XMLHttpRequest", FakeXhr);
+    const out = await directUpload("logo", "b1", new File([new Uint8Array(8)], "mark.png", { type: "image/png" }));
+    expect(out.route).toBe("multipart");
+    expect(out.brand.logo_url).toBe("https://view/logo.png");
+    expect(api.count("POST /api/gd/brands/b1/uploads")).toBe(1);
+  });
+
+  it("says plainly, and sends nothing more, when direct uploads are off and the file is over the old route's limit", async () => {
+    const api = stubBackend({
+      "POST /api/gd/runs/r1/uploads": json({ detail: { code: "direct_uploads_disabled", message: "off" } }, 503),
+    });
+    const err = await directUpload("background", "r1", jpeg(11 * 1024 * 1024)).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(UploadError);
+    expect((err as Error).message).toBe(
+      "This file is 11 MB. Large uploads are not switched on for this server yet, so it takes files up to 10 MB — use a smaller file.",
+    );
+    expect(api.calls.map((c) => c.key)).toEqual(["POST /api/gd/runs/r1/uploads"]);
+  });
+
+  it("retries finalize with the SAME ticket after a 503, waiting what Retry-After says, without sending the file again", async () => {
+    vi.useFakeTimers();
+    const api = stubBackend({
+      "POST /api/gd/runs/r1/uploads": json(signed("tkt-1")),
+      "POST /api/gd/runs/r1/uploads/finalize": [
+        json({ detail: { code: "upload_busy", message: "Another large file is being processed — try again shortly.", retry_after: 30 } }, 503, { "Retry-After": "2" }),
+        json({ ref: "md5-w4096.jpg", role: "background", upload: stored("background") }),
+      ],
+    });
+    vi.stubGlobal("XMLHttpRequest", FakeXhr);
+
+    const pending = directUpload("background", "r1", jpeg());
+    await vi.advanceTimersByTimeAsync(1_999);
+    expect(api.count("POST /api/gd/runs/r1/uploads/finalize")).toBe(1);
+    await vi.advanceTimersByTimeAsync(1);
+    const out = await pending;
+
+    expect(out).toMatchObject({ ref: "md5-w4096.jpg", role: "background", route: "direct" });
+    const finals = api.calls.filter((c) => c.key === "POST /api/gd/runs/r1/uploads/finalize");
+    expect(finals.map((c) => JSON.parse(String(c.init.body)).ticket)).toEqual(["tkt-1", "tkt-1"]);
+    expect(api.count("POST /api/gd/runs/r1/uploads")).toBe(1);
+    expect(FakeXhr.made).toHaveLength(1);
+  });
+
+  it("starts over from sign when storage refuses the PUT, and finalizes the new ticket", async () => {
+    FakeXhr.answers = [403, 200];
+    const api = stubBackend({
+      "POST /api/gd/runs/r1/uploads": [json(signed("tkt-1")), json(signed("tkt-2"))],
+      "POST /api/gd/runs/r1/uploads/finalize": json({ ref: "md5-w4096.png", role: "prompt", upload: stored("prompt") }),
+    });
+    vi.stubGlobal("XMLHttpRequest", FakeXhr);
+    await directUpload("prompt", "r1", jpeg());
+    expect(FakeXhr.made.map((x) => x.url)).toEqual([signed("tkt-1").upload_url, signed("tkt-2").upload_url]);
+    const finals = api.calls.filter((c) => c.key === "POST /api/gd/runs/r1/uploads/finalize");
+    expect(finals.map((c) => JSON.parse(String(c.init.body)).ticket)).toEqual(["tkt-2"]);
+  });
+
+  it("without XHR, still PUTs with credentials omitted and no app token", async () => {
+    setAuthToken("app-jwt");
+    const api = stubBackend({
+      "POST /api/gd/runs/r1/uploads": json(signed("tkt-1")),
+      "PUT /uploads/pending/tkt-1": () => new Response(null, { status: 200 }),
+      "POST /api/gd/runs/r1/uploads/finalize": json({ ref: "md5-w4096.png", role: "element", upload: stored("element") }),
+    });
+    const file = jpeg();
+    const out = await directUpload("element", "r1", file);
+    const put = api.calls.find((c) => c.key === "PUT /uploads/pending/tkt-1");
+    expect(put?.init.credentials).toBe("omit");
+    expect(put?.init.body).toBe(file);
+    expect(new Headers(put?.init.headers).has("Authorization")).toBe(false);
+    expect(Object.fromEntries(new Headers(put?.init.headers))).toEqual({
+      "content-type": "image/jpeg", "x-goog-content-length-range": "1,52428800", "x-goog-if-generation-match": "0",
+    });
+    expect(out.ref).toBe("md5-w4096.png");
+  });
+
+  it("keeps a reply's structured detail — code, facts and Retry-After — on the ApiError, with its message as the text", async () => {
+    stubBackend({
+      "GET /api/gd/brands/b1": json(
+        { detail: { code: "upload_busy", message: "Another large file is being processed — try again shortly.", retry_after: 30 } },
+        503,
+        { "Retry-After": "7" },
+      ),
+    });
+    const err = await gdBrand("b1").catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(ApiError);
+    const e = err as ApiError;
+    expect(e.status).toBe(503);
+    expect(e.code).toBe("upload_busy");
+    expect(e.retryAfterS).toBe(7);
+    expect(e.message).toBe("Another large file is being processed — try again shortly.");
+    expect((e.detail as { retry_after: number }).retry_after).toBe(30);
   });
 });
