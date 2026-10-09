@@ -17,10 +17,13 @@
  *  is one card beside the cosmos, never the greeting.
  */
 
-import { useCallback, useEffect, useState, type KeyboardEvent } from "react";
+import {
+  useCallback, useEffect, useId, useLayoutEffect, useRef, useState,
+  type KeyboardEvent, type PointerEvent, type RefObject,
+} from "react";
 import {
   apiStatus, teamUsage,
-  type HumansMonth, type HumansUser, type TeamReportee, type TeamUsage, type TeamUsageTeam,
+  type HumansDay, type HumansMonth, type HumansUser, type TeamReportee, type TeamUsage, type TeamUsageTeam,
 } from "@/lib/api";
 import { loadPending, useLoadSession, type Load } from "@/lib/load";
 import { useHeadline, useHub } from "../context";
@@ -30,8 +33,9 @@ import { JOBS } from "../jobs";
 import { WORKSPACE_SLUG, agentsFor, greeting, n, word, type HubAgent } from "../model";
 import { ago, clock } from "../format";
 import {
-  ROW_NOTE, agentChips, boardTabs, hasExtras, monthLabel, pickTab, rowState,
-  summaryNote, teamSummary, usersByRuns, windowNote, type AgentChip, type BoardTab,
+  AVG_DAYS, ROW_NOTE, TREND_ID, agentChips, boardTabs, dayShort, dayWithWeekday, deltaFigure, hasExtras,
+  monthLabel, perDay, pickTab, rowState, summaryNote, teamSummary, trendSeries, usersByRuns, weekOverWeek,
+  weekSentence, windowNote, yTicks, type AgentChip, type BoardTab, type TrendDay, type TrendSpan,
 } from "../teamUsage";
 import { Ic } from "../Sprite";
 import { Oops, RuleHead } from "../ui";
@@ -217,17 +221,44 @@ function BoardWait() {
 }
 
 const tabDom = (id: string) => `hboard-tab-${id.replace(/\W/g, "-")}`;
+const TREND_DOM = "hboard-trend";
 
 /** One card, a tab a view. The strip is a real tablist: the selected tab is
- *  the one in the tab order, arrows move along it, Home and End jump. */
+ *  the one in the tab order, arrows move along it, Home and End jump.
+ *
+ *  At the strip's right end, outside the tablist, sits the "Daily trend"
+ *  toggle (admin board, and only when the backend sent days). Pressed, it
+ *  takes the body; any tab returns to that tab; pressing it again returns to
+ *  the tab it covered. It is remembered like a tab, as `trend` — and if the
+ *  days stop coming, `pickTab` simply opens the first tab instead. */
 function Board({ data }: { data: TeamUsage }) {
   const tabs = boardTabs(data);
+  const daily = data.humans?.daily ?? [];
+  const canTrend = daily.length > 0;
   const [chosen, setChosen] = useState<string | null>(rememberedTab);
-  const tab = pickTab(tabs, chosen);
+  // The tab the trend covers, so un-pressing it goes back where it came from.
+  const [under, setUnder] = useState<string | null>(() => (chosen === TREND_ID ? null : chosen));
+  const trendOn = canTrend && chosen === TREND_ID;
+  const tab = pickTab(tabs, trendOn ? under : chosen);
 
   const choose = (t: BoardTab) => {
     setChosen(t.id);
+    setUnder(t.id);
     rememberTab(t.id);
+  };
+
+  const toggleTrend = () => {
+    if (!trendOn) {
+      setChosen(TREND_ID);
+      rememberTab(TREND_ID);
+      return;
+    }
+    if (tab) {
+      choose(tab);
+    } else {
+      setChosen(null);
+      rememberTab("");
+    }
   };
 
   const onKey = (e: KeyboardEvent<HTMLDivElement>) => {
@@ -246,36 +277,55 @@ function Board({ data }: { data: TeamUsage }) {
 
   return (
     <section className="hboard" aria-label="Usage by your team">
-      {tabs.length > 0 && (
-        <div className="hboard__tabs" role="tablist" aria-label="Usage views" onKeyDown={onKey}>
-          {tabs.map((t) => {
-            const on = tab?.id === t.id;
-            return (
-              <button
-                type="button"
-                role="tab"
-                key={t.id}
-                id={tabDom(t.id)}
-                className="hboard__tab"
-                aria-selected={on}
-                aria-controls="hboard-panel"
-                tabIndex={on ? 0 : -1}
-                onClick={() => choose(t)}
-              >
-                {t.label}
-              </button>
-            );
-          })}
+      {(tabs.length > 0 || canTrend) && (
+        <div className="hboard__tabs">
+          {tabs.length > 0 && (
+            <div className="hboard__tablist" role="tablist" aria-label="Usage views" onKeyDown={onKey}>
+              {tabs.map((t) => {
+                const on = tab?.id === t.id;
+                return (
+                  <button
+                    type="button"
+                    role="tab"
+                    key={t.id}
+                    id={tabDom(t.id)}
+                    className="hboard__tab"
+                    aria-selected={on && !trendOn}
+                    aria-controls="hboard-panel"
+                    tabIndex={on ? 0 : -1}
+                    onClick={() => choose(t)}
+                  >
+                    {t.label}
+                  </button>
+                );
+              })}
+            </div>
+          )}
+          {canTrend && (
+            <button
+              type="button"
+              id={TREND_DOM}
+              className="hboard__trend"
+              aria-pressed={trendOn}
+              aria-controls="hboard-panel"
+              onClick={toggleTrend}
+            >
+              <Ic name="lines" />
+              Daily trend
+            </button>
+          )}
         </div>
       )}
       <div
         className="hboard__body"
-        role="tabpanel"
+        role={trendOn ? "region" : "tabpanel"}
         id="hboard-panel"
-        aria-labelledby={tab ? tabDom(tab.id) : undefined}
-        key={tab?.id ?? "none"}
+        aria-labelledby={trendOn ? TREND_DOM : tab ? tabDom(tab.id) : undefined}
+        key={trendOn ? TREND_ID : tab?.id ?? "none"}
       >
-        {tab === null ? (
+        {trendOn ? (
+          <TrendPanel daily={daily} excluded={data.humans?.excluded ?? ""} />
+        ) : tab === null ? (
           <>
             <p className="hboard__none">
               Nothing has been recorded yet. Runs that people start appear here by month, with who started them.
@@ -434,6 +484,302 @@ function Person({ u }: { u: HumansUser }) {
       {chips.length > 0 && <Chips chips={chips} who={u.name || u.email} />}
       <span className="num">{n(u.runs)}</span>
     </li>
+  );
+}
+
+/* --- by humans, day by day --- */
+
+const SPANS: readonly TrendSpan[] = [30, 60];
+
+/** "Is it going up or down?" First the answer — the last seven complete days
+ *  against the seven before, as a figure and a sentence — then the days
+ *  themselves, so the answer can be checked against them. Down is said in
+ *  ink: red in this console means something failed, and fewer runs is not a
+ *  failure. */
+function TrendPanel({ daily, excluded }: { daily: HumansDay[]; excluded: string }) {
+  const [span, setSpan] = useState<TrendSpan>(30);
+  const cmp = weekOverWeek(daily);
+  const delta = deltaFigure(cmp);
+  const days = trendSeries(daily, span);
+  const today = days[days.length - 1];
+
+  return (
+    <div className="hbt">
+      <div className="hboard__figs hbt__head">
+        {cmp.kind === "compare" || cmp.days > 0 ? (
+          <p className="hboard__fig">
+            <b>{n(cmp.recent)}</b>
+            <span>
+              {cmp.kind === "short" && cmp.days < AVG_DAYS
+                ? `run${cmp.recent === 1 ? "" : "s"} · last ${word(cmp.days)} full day${cmp.days === 1 ? "" : "s"}`
+                : `run${cmp.recent === 1 ? "" : "s"} · last ${AVG_DAYS} full days`}
+            </span>
+          </p>
+        ) : null}
+        {cmp.kind === "compare" && delta && (
+          <p className={`hbt__delta is-${cmp.dir}`}>
+            <b>
+              <Ic name={cmp.dir === "up" ? "up" : cmp.dir === "down" ? "down" : "flat"} />
+              {delta}
+            </b>
+            {(cmp.pct !== null || cmp.recent === 0) && <span>vs the {AVG_DAYS} days before</span>}
+          </p>
+        )}
+        {daily.length > SPANS[0] && (
+          <div className="sg hbt__span" role="group" aria-label="Days on the chart">
+            {SPANS.map((s) => (
+              <button
+                type="button"
+                key={s}
+                className={`sg__b${span === s ? " is-on" : ""}`}
+                aria-pressed={span === s}
+                onClick={() => setSpan(s)}
+              >
+                {s} days
+              </button>
+            ))}
+          </div>
+        )}
+      </div>
+
+      <p className="hbt__say">{weekSentence(cmp)}</p>
+
+      <TrendChart days={days} />
+
+      <ul className="hbt__key">
+        <li><i className="hbt__sw hbt__sw--col" aria-hidden="true" />Runs a day</li>
+        <li><i className="hbt__sw hbt__sw--avg" aria-hidden="true" />{AVG_DAYS}-day average</li>
+        <li><i className="hbt__sw hbt__sw--today" aria-hidden="true" />Today, so far</li>
+        <li><i className="hbt__sw hbt__sw--we" aria-hidden="true" />Weekend</li>
+      </ul>
+
+      <p className="hboard__foot">
+        {today ? `Today, ${dayWithWeekday(today.day)}, is still going, so it is left out of both weeks and of the average. ` : ""}
+        {excluded}
+      </p>
+    </div>
+  );
+}
+
+/** The card's width, read before paint so the chart is drawn at its real size
+ *  — text at its own size, columns at their own width — rather than a scaled
+ *  picture of one. */
+function useWidth(ref: RefObject<HTMLElement | null>): number {
+  const [w, setW] = useState(0);
+  useLayoutEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    const read = () => setW(el.clientWidth);
+    read();
+    if (typeof ResizeObserver === "undefined") return;
+    const ro = new ResizeObserver(read);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, [ref]);
+  return w;
+}
+
+/** Plot height including the x-axis band, so the card never scrolls inside.
+ *  `.hbt__plot` in hub-live.css reserves the same height before the width is
+ *  known. */
+const CH = 136;
+const CPAD = { t: 8, r: 2, b: 20 };
+
+/** A rounded data end, square at the baseline. */
+function columnPath(x: number, w: number, top: number, base: number): string {
+  const h = base - top;
+  if (h <= 0) return "";
+  const r = Math.min(4, w / 2, h);
+  return `M${x} ${base}V${top + r}Q${x} ${top} ${x + r} ${top}H${x + w - r}Q${x + w} ${top} ${x + w} ${top + r}V${base}Z`;
+}
+
+/** One column a day with the 7-day average over it. Hover, or focus and use
+ *  the arrow keys, for a day's readout; the same figures are in a table for
+ *  screen readers, so nothing is reachable only by pointing. */
+function TrendChart({ days }: { days: TrendDay[] }) {
+  const box = useRef<HTMLDivElement>(null);
+  const width = useWidth(box);
+  const uid = useId().replace(/[^\w-]/g, "");
+  const [at, setAt] = useState<number | null>(null);
+  const [keyed, setKeyed] = useState(false);
+
+  const len = days.length;
+  if (len === 0) return null;
+
+  const cur = at === null ? null : Math.min(at, len - 1);
+  const first = days[0];
+  const last = days[len - 1];
+  const quiet = days.every((d) => d.runs === 0);
+
+  const ticks = yTicks(Math.max(...days.map((d) => Math.max(d.runs, d.avg ?? 0))));
+  const top = ticks[2];
+  const padL = Math.max(...ticks.map((t) => n(t).length)) * 6 + 8;
+  const plotW = Math.max(0, width - padL - CPAD.r);
+  const slot = plotW / len;
+  const bw = Math.max(1, Math.min(24, slot - 2));
+  const y = (v: number) => CPAD.t + (1 - v / top) * (CH - CPAD.t - CPAD.b);
+  const y0 = y(0);
+  const left = (i: number) => padL + i * slot;
+  const cx = (i: number) => left(i) + slot / 2;
+
+  let line = "";
+  let pen = false;
+  let end = -1;
+  days.forEach((d, i) => {
+    if (d.avg === null) {
+      pen = false;
+      return;
+    }
+    line += `${pen ? "L" : "M"}${cx(i).toFixed(1)} ${y(d.avg).toFixed(1)}`;
+    pen = true;
+    end = i;
+  });
+
+  // A label on a Monday, every week while there is room, every other (or
+  // fewer) when the columns are thin — counted back from the latest, so the
+  // newest week is always named.
+  const every = Math.max(1, Math.ceil(64 / Math.max(slot * 7, 1)));
+  const mondays = days.flatMap((d, i) => (d.monday ? [i] : [])).reverse();
+  const labelled = mondays.filter((_, k) => k % every === 0).filter((i) => cx(i) - 16 >= 0 && cx(i) + 16 <= width);
+
+  const indexAt = (clientX: number) => {
+    const rect = box.current?.getBoundingClientRect();
+    if (!rect || slot <= 0) return null;
+    return Math.max(0, Math.min(len - 1, Math.floor((clientX - rect.left - padL) / slot)));
+  };
+
+  const onPointerMove = (e: PointerEvent<HTMLDivElement>) => {
+    setKeyed(false);
+    setAt(indexAt(e.clientX));
+  };
+
+  const onKey = (e: KeyboardEvent<HTMLDivElement>) => {
+    const i = cur ?? len - 1;
+    let next: number;
+    if (e.key === "ArrowRight") next = Math.min(len - 1, i + 1);
+    else if (e.key === "ArrowLeft") next = Math.max(0, i - 1);
+    else if (e.key === "Home") next = 0;
+    else if (e.key === "End") next = len - 1;
+    else return;
+    e.preventDefault();
+    setKeyed(true);
+    setAt(next);
+  };
+
+  const read = cur === null ? null : days[cur];
+  const tipLeft = cur !== null && cx(cur) < width / 2;
+
+  return (
+    <div
+      ref={box}
+      className="hbt__plot"
+      tabIndex={0}
+      role="group"
+      aria-roledescription="chart"
+      aria-label={`Runs a day by people, ${dayShort(first.day)} to ${dayShort(last.day)}. Arrow keys move from day to day.`}
+      onPointerMove={onPointerMove}
+      onPointerLeave={() => { if (!keyed) setAt(null); }}
+      onFocus={(e) => {
+        // Only a keyboard arrival opens a readout; a click lands with the
+        // pointer already showing one.
+        if (!e.currentTarget.matches(":focus-visible")) return;
+        setKeyed(true);
+        setAt((a) => a ?? len - 1);
+      }}
+      onBlur={() => { setKeyed(false); setAt(null); }}
+      onKeyDown={onKey}
+    >
+      {width > 0 && (
+        <svg width={width} height={CH} viewBox={`0 0 ${width} ${CH}`} aria-hidden="true" focusable="false">
+          <defs>
+            <pattern id={`hbt-hatch-${uid}`} width="4" height="4" patternUnits="userSpaceOnUse" patternTransform="rotate(45)">
+              <rect className="hbt__hatch-bg" width="4" height="4" />
+              <line className="hbt__hatch-ln" x1="0" y1="0" x2="0" y2="4" />
+            </pattern>
+          </defs>
+
+          {days.map((d, i) => d.weekend && (
+            <rect key={`w${d.day}`} className="hbt__we" x={left(i)} y={CPAD.t} width={slot} height={y0 - CPAD.t} />
+          ))}
+          {cur !== null && <rect className="hbt__hl" x={left(cur)} y={CPAD.t} width={slot} height={y0 - CPAD.t} />}
+
+          {ticks.slice(1).map((t) => (
+            <line key={`g${t}`} className="hbt__grid" x1={padL} x2={width - CPAD.r} y1={Math.round(y(t)) + 0.5} y2={Math.round(y(t)) + 0.5} />
+          ))}
+          {ticks.map((t) => (
+            <text key={`t${t}`} className="hbt__ax" x={padL - 6} y={y(t) + 3.5} textAnchor="end">{n(t)}</text>
+          ))}
+
+          {days.map((d, i) => {
+            const p = columnPath(left(i) + (slot - bw) / 2, bw, y(d.runs), y0);
+            if (!p) return null;
+            // Today's count is partial, so its column is hatched rather than
+            // solid. Inline, because the class's fill would outrank an attribute.
+            return (
+              <path
+                key={`c${d.day}`}
+                d={p}
+                className={`hbt__col${i === cur ? " is-on" : ""}`}
+                style={d.today ? { fill: `url(#hbt-hatch-${uid})` } : undefined}
+              />
+            );
+          })}
+
+          <line className="hbt__base" x1={padL} x2={width - CPAD.r} y1={Math.round(y0) + 0.5} y2={Math.round(y0) + 0.5} />
+
+          {line && <path className="hbt__avg-halo" d={line} />}
+          {line && <path className="hbt__avg" d={line} />}
+          {end >= 0 && days[end].avg !== null && (
+            <circle className="hbt__dot" cx={cx(end)} cy={y(days[end].avg ?? 0)} r="4" />
+          )}
+
+          {labelled.map((i) => (
+            <text key={`x${days[i].day}`} className="hbt__ax" x={cx(i)} y={CH - 5} textAnchor="middle">
+              {dayShort(days[i].day)}
+            </text>
+          ))}
+        </svg>
+      )}
+
+      {quiet && <p className="hbt__calm">No human runs in these days.</p>}
+
+      {read && cur !== null && width > 0 && (
+        <div
+          className="hbt__tip"
+          style={tipLeft ? { left: left(cur) + slot + 6 } : { right: width - left(cur) + 6 }}
+          aria-live={keyed ? "polite" : undefined}
+        >
+          <span className="hbt__tipday">{dayWithWeekday(read.day)}{read.today ? " · today, so far" : ""}</span>
+          <span><i className="hbt__tk hbt__tk--col" aria-hidden="true" /><b>{n(read.runs)}</b> run{read.runs === 1 ? "" : "s"}</span>
+          <span><i className="hbt__tk" aria-hidden="true" /><b>{n(read.people)}</b> {read.people === 1 ? "person" : "people"}</span>
+          {read.avg !== null && (
+            <span><i className="hbt__tk hbt__tk--avg" aria-hidden="true" /><b>{perDay(read.avg)}</b> a day, {AVG_DAYS}-day average</span>
+          )}
+        </div>
+      )}
+
+      <table className="vh">
+        <caption>Agent runs by people, a day at a time, {dayShort(first.day)} to {dayShort(last.day)}</caption>
+        <thead>
+          <tr>
+            <th scope="col">Day</th>
+            <th scope="col">Runs</th>
+            <th scope="col">People</th>
+            <th scope="col">{AVG_DAYS}-day average</th>
+          </tr>
+        </thead>
+        <tbody>
+          {days.map((d) => (
+            <tr key={d.day}>
+              <th scope="row">{dayWithWeekday(d.day)}{d.today ? " (today, so far)" : ""}</th>
+              <td>{n(d.runs)}</td>
+              <td>{n(d.people)}</td>
+              <td>{d.avg === null ? "—" : perDay(d.avg)}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
   );
 }
 

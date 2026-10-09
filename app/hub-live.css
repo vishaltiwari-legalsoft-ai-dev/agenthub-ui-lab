@@ -704,18 +704,24 @@
 @keyframes hboard-in { from { opacity: 0; } to { opacity: 1; } }
 .hero .hboard + .lede { margin-top: 18px; }
 
-/* the strip: a real tablist, the open tab underlined in the mark */
+/* the strip: a real tablist, the open tab underlined in the mark. The tablist
+   scrolls on its own and sits 1px over the strip's rule, so the underline
+   replaces the rule under the open tab; the trend toggle stays pinned right. */
 .hboard__tabs {
-  display: flex; gap: 2px;
+  display: flex; align-items: flex-end; gap: 2px;
   padding: 6px 10px 0;
   border-bottom: 1px solid var(--rule-soft);
   background: color-mix(in srgb, var(--surface-2) 55%, transparent);
-  overflow-x: auto;
+}
+.hboard__tablist {
+  display: flex; gap: 2px;
+  flex: 1 1 auto; min-width: 0;
+  margin-bottom: -1px;
+  overflow-x: auto; overflow-y: hidden;
 }
 .hboard__tab {
   flex: 0 0 auto;
   padding: 9px 11px 8px;
-  margin-bottom: -1px;
   border-bottom: 2px solid transparent;
   border-radius: var(--r-mark) var(--r-mark) 0 0;
   font-size: 12.5px; font-weight: 600;
@@ -800,6 +806,118 @@
 .hboard.is-wait .hboard__body { display: grid; gap: 10px; align-content: start; }
 .hboard.is-wait .hboard__body i { height: 30px; }
 .hboard.is-wait .hboard__body i:first-child { width: 40%; height: 46px; }
+
+/* --- the daily trend ---------------------------------------------------
+ * The toggle at the strip's right end, then one column a day with a 7-day
+ * average over it. Chart rules: one hue for magnitude — the columns are the
+ * mark at 65% on the surface (≥3:1 on it in both themes), the average a deeper
+ * step of the same hue in light and a lighter one in dark (≥3:1 against the
+ * columns), riding a surface halo where it crosses them. Hairline solid grid,
+ * text in ink tokens only. Today is partial, so its column is hatched at 45°.
+ * Weekends sit on a faint wash so their dips read as weekends. Up is the
+ * console's positive green; down and flat stay in ink — the one red here
+ * means a record could not be read, and fewer runs is not that. */
+
+.hbt {
+  --hbt-col: color-mix(in srgb, var(--mark) 65%, var(--surface));
+  --hbt-col-on: color-mix(in srgb, var(--mark) 85%, var(--surface));
+  --hbt-avg: color-mix(in srgb, var(--mark-line) 70%, var(--fg));
+  --hbt-today: color-mix(in srgb, var(--mark) 18%, var(--surface));
+  --hbt-we: color-mix(in srgb, var(--fg) 4%, transparent);
+  --hbt-hl: color-mix(in srgb, var(--fg) 8%, transparent);
+}
+:root[data-theme="dark"] .hbt {
+  --hbt-avg: color-mix(in srgb, var(--mark) 35%, var(--fg));
+  --hbt-we: color-mix(in srgb, var(--fg) 5%, transparent);
+}
+
+.hboard__trend {
+  flex: 0 0 auto; align-self: center;
+  display: inline-flex; align-items: center; gap: 6px;
+  margin-left: 8px; padding: 4px 11px 4px 9px;
+  border: 1px solid var(--rule); border-radius: var(--r-pill);
+  background: var(--surface);
+  font-size: 12px; font-weight: 600; color: var(--fg-2); white-space: nowrap;
+  transition: color var(--t-fast) var(--ease), border-color var(--t-fast) var(--ease), background var(--t-fast) var(--ease);
+}
+.hboard__trend svg { width: 14px; height: 14px; flex: 0 0 auto; }
+.hboard__trend:hover { border-color: var(--rule-hard); color: var(--fg); }
+.hboard__trend[aria-pressed="true"] { border-color: var(--mark); background: var(--mark-row); color: var(--fg); }
+
+.hbt__head { flex-wrap: wrap; gap: 10px 28px; margin-bottom: 8px; }
+.hbt__delta { margin: 0; display: grid; gap: 3px; }
+.hbt__delta b {
+  display: inline-flex; align-items: center; gap: 4px;
+  font-size: 20px; font-weight: 650; line-height: 1.05; letter-spacing: -0.02em;
+  color: var(--fg-2);
+}
+.hbt__delta b svg { width: 18px; height: 18px; flex: 0 0 auto; }
+.hbt__delta span { font-size: 10px; font-weight: 650; letter-spacing: 0.12em; text-transform: uppercase; color: var(--fg-3); }
+.hbt__delta.is-up b { color: var(--ok); }
+.hbt__span { margin-left: auto; align-self: flex-start; }
+.hbt__span .sg__b { padding: 4px 9px; font-size: 11px; }
+
+.hbt__say { margin: 0 0 6px; font-size: 12.5px; line-height: 1.5; color: var(--fg); }
+
+/* the plot: drawn at the card's real width; this box reserves its height, x-axis
+   band included, before the width is known, so nothing moves when it draws */
+.hbt__plot { position: relative; height: 136px; border-radius: var(--r-cell); touch-action: pan-y; }
+.hbt__plot:focus-visible { outline-offset: 3px; }
+/* the global icon rule strokes every `svg[aria-hidden]` in currentColor and
+   every child inherits it; a chart's marks carry their own paint instead */
+.hbt__plot svg[aria-hidden] { display: block; overflow: visible; fill: none; stroke: none; stroke-width: 0; }
+
+.hbt__we { fill: var(--hbt-we); }
+.hbt__hl { fill: var(--hbt-hl); }
+.hbt__grid { stroke: var(--rule-soft); stroke-width: 1; }
+.hbt__base { stroke: var(--rule); stroke-width: 1; }
+.hbt__ax { font-size: 10px; fill: var(--fg-3); font-variant-numeric: tabular-nums; }
+.hbt__col { fill: var(--hbt-col); }
+.hbt__col.is-on { fill: var(--hbt-col-on); }
+.hbt__hatch-bg { fill: var(--hbt-today); }
+.hbt__hatch-ln { stroke: var(--hbt-col); stroke-width: 1.6; }
+.hbt__avg-halo { fill: none; stroke: var(--surface); stroke-width: 6; stroke-linecap: round; stroke-linejoin: round; }
+.hbt__avg { fill: none; stroke: var(--hbt-avg); stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+.hbt__dot { fill: var(--hbt-avg); stroke: var(--surface); stroke-width: 2; }
+
+.hbt__calm {
+  position: absolute; left: 0; right: 0; top: 30%;
+  margin: 0; text-align: center; pointer-events: none;
+  font-size: 12px; color: var(--fg-3);
+}
+
+/* a day's readout: the values lead, a short stroke keys the mark */
+.hbt__tip {
+  position: absolute; top: 0; z-index: 2;
+  display: grid; gap: 2px;
+  padding: 7px 10px;
+  border: 1px solid var(--rule); border-radius: 9px;
+  background: var(--surface); box-shadow: var(--shadow-lift);
+  pointer-events: none; white-space: nowrap;
+  font-size: 11px; color: var(--fg-2);
+}
+.hbt__tip span { display: flex; align-items: center; gap: 6px; }
+.hbt__tip b { font-size: 12px; font-weight: 650; font-variant-numeric: tabular-nums; color: var(--fg); }
+.hbt__tip .hbt__tipday { margin-bottom: 2px; font-size: 10.5px; font-weight: 650; color: var(--fg-3); }
+.hbt__tk { width: 10px; height: 2px; border-radius: 1px; flex: 0 0 auto; }
+.hbt__tk--col { background: var(--hbt-col); }
+.hbt__tk--avg { background: var(--hbt-avg); }
+
+/* the legend mirrors the marks: a column, a line, a hatched column, a wash */
+.hbt__key {
+  list-style: none; margin: 6px 0 0; padding: 0;
+  display: flex; flex-wrap: wrap; gap: 4px 14px;
+  font-size: 11px; color: var(--fg-2);
+}
+.hbt__key li { display: inline-flex; align-items: center; gap: 6px; }
+.hbt__sw { display: inline-block; flex: 0 0 auto; }
+.hbt__sw--col { width: 7px; height: 11px; border-radius: 2px 2px 0 0; background: var(--hbt-col); }
+.hbt__sw--avg { width: 14px; height: 2px; border-radius: 1px; background: var(--hbt-avg); }
+.hbt__sw--today {
+  width: 7px; height: 11px; border-radius: 2px 2px 0 0;
+  background: repeating-linear-gradient(45deg, var(--hbt-col) 0 1.4px, var(--hbt-today) 1.4px 3.6px);
+}
+.hbt__sw--we { width: 11px; height: 11px; border-radius: 2px; background: var(--hbt-we); box-shadow: inset 0 0 0 1px var(--rule-soft); }
 
 @media (prefers-reduced-motion: reduce) {
   .hboard { animation: none; }

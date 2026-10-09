@@ -8,8 +8,8 @@
  *  anything.
  */
 
-import type { HumansMonth, HumansUser, TeamReportee, TeamUsage, TeamUsageTeam } from "@/lib/api";
-import { AGENTS } from "./model";
+import type { HumansDay, HumansMonth, HumansUser, TeamReportee, TeamUsage, TeamUsageTeam } from "@/lib/api";
+import { AGENTS, n } from "./model";
 
 /* ------------------------------------------------------------- the rows -- */
 
@@ -181,4 +181,181 @@ export function boardTabs(p: Pick<TeamUsage, "team" | "humans">): BoardTab[] {
 export function pickTab(tabs: readonly BoardTab[], remembered: string | null | undefined): BoardTab | null {
   if (tabs.length === 0) return null;
   return tabs.find((t) => t.id === remembered) ?? tabs[0];
+}
+
+/* ------------------------------------------------------- the daily trend -- */
+/* "Is it going up or down?" — asked of the days people ran the specialists,
+ * cron never among them. The backend sends the last 60 calendar days, oldest
+ * first, every day present, today last; today is still going, so it is drawn
+ * (marked as partial) but never compared and never averaged. */
+
+/** What the board remembers for its trend view, beside the tab ids. No tab is
+ *  ever called this (`team`, `m:YYYY-MM`), so when the trend is gone `pickTab`
+ *  falls back past it to the first tab. */
+export const TREND_ID = "trend";
+
+/** The days the week-over-week compares and the average line spans. */
+export const AVG_DAYS = 7;
+
+export type TrendSpan = 30 | 60;
+
+/** Offered on the admin board only, and only when the backend sent days. An
+ *  older backend sends none, and then there is no button at all. */
+export function hasTrend(p: Pick<TeamUsage, "humans">): boolean {
+  return (p.humans?.daily?.length ?? 0) > 0;
+}
+
+const WEEKDAYS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+
+/** 0 for Sunday … 6 for Saturday, read off the calendar date itself, so the
+ *  reader's timezone cannot move a day across midnight. */
+function weekdayOf(ymd: string): number | null {
+  const c = calendar(ymd);
+  if (!c || c.d === null) return null;
+  return new Date(Date.UTC(c.y, c.m - 1, c.d)).getUTCDay();
+}
+
+/** `6 Oct` — an axis label. */
+export function dayShort(ymd: string): string {
+  const c = calendar(ymd);
+  if (!c || c.d === null) return ymd;
+  return `${c.d} ${MONTH_NAMES[c.m - 1].slice(0, 3)}`;
+}
+
+/** `Tue 6 Oct` — the heading of a day's readout. */
+export function dayWithWeekday(ymd: string): string {
+  const w = weekdayOf(ymd);
+  return w === null ? ymd : `${WEEKDAYS[w]} ${dayShort(ymd)}`;
+}
+
+/** Oldest first, whatever order arrived. `YYYY-MM-DD` sorts as a string.
+ *  Returns a copy. */
+export function daysOldestFirst(daily: readonly HumansDay[]): HumansDay[] {
+  return [...daily].sort((a, b) => (a.day < b.day ? -1 : a.day > b.day ? 1 : 0));
+}
+
+/** The mean of each value and the `k - 1` before it; null until there are `k`
+ *  to average — a short average would claim a week it has not seen. */
+export function trailingAverage(values: readonly number[], k = AVG_DAYS): (number | null)[] {
+  const out: (number | null)[] = [];
+  let sum = 0;
+  for (let i = 0; i < values.length; i++) {
+    sum += values[i];
+    if (i >= k) sum -= values[i - k];
+    out.push(i >= k - 1 ? sum / k : null);
+  }
+  return out;
+}
+
+export interface TrendDay extends HumansDay {
+  /** The average of the seven complete days ending on this one; null for
+   *  today and for any day without seven complete days behind it. */
+  avg: number | null;
+  /** The last day sent: still going, so its count is partial. */
+  today: boolean;
+  weekend: boolean;
+  /** The axis labels sit on Mondays. */
+  monday: boolean;
+}
+
+/** The days the chart draws: the last `span` of them, today among them. The
+ *  average is taken across every complete day sent, so the first column of a
+ *  30-day window still has its full week behind it; today is left out of it,
+ *  because a morning's count would bend the line down every day before noon. */
+export function trendSeries(daily: readonly HumansDay[], span: TrendSpan): TrendDay[] {
+  const days = daysOldestFirst(daily);
+  const complete = days.length - 1;
+  const avg = trailingAverage(days.slice(0, complete).map((d) => d.runs));
+  return days
+    .map((d, i) => {
+      const w = weekdayOf(d.day);
+      return {
+        ...d,
+        avg: i < complete ? avg[i] : null,
+        today: i === complete,
+        weekend: w === 0 || w === 6,
+        monday: w === 1,
+      };
+    })
+    .slice(-span);
+}
+
+/** This week against last, where a "week" is seven complete days: the seven
+ *  ending yesterday against the seven before them. `short` until fourteen
+ *  complete days exist — a comparison with a hole in it is not one. */
+export type WeekCompare =
+  | { kind: "short"; complete: number; recent: number; days: number }
+  | {
+      kind: "compare";
+      recent: number;
+      previous: number;
+      /** Whole percent, rounded away from zero symmetrically; null when the
+       *  earlier week had no runs, because a change on nothing has no size. */
+      pct: number | null;
+      dir: "up" | "down" | "flat";
+    };
+
+export function weekOverWeek(daily: readonly HumansDay[]): WeekCompare {
+  const complete = daysOldestFirst(daily).slice(0, -1);
+  const total = (ds: readonly HumansDay[]) => ds.reduce((s, d) => s + d.runs, 0);
+  const last = complete.slice(-AVG_DAYS);
+  const recent = total(last);
+  if (complete.length < 2 * AVG_DAYS) {
+    return { kind: "short", complete: complete.length, recent, days: last.length };
+  }
+  const previous = total(complete.slice(-2 * AVG_DAYS, -AVG_DAYS));
+  if (previous === 0) {
+    return { kind: "compare", recent, previous, pct: null, dir: recent > 0 ? "up" : "flat" };
+  }
+  const raw = ((recent - previous) / previous) * 100;
+  const pct = Math.sign(raw) * Math.round(Math.abs(raw)) || 0;
+  return { kind: "compare", recent, previous, pct, dir: pct > 0 ? "up" : pct < 0 ? "down" : "flat" };
+}
+
+const runsWord = (v: number) => `${n(v)} run${v === 1 ? "" : "s"}`;
+
+/** The plain sentence under the headline figures. */
+export function weekSentence(c: WeekCompare): string {
+  if (c.kind === "short") {
+    const have = c.complete === 0 ? "none is" : c.complete === 1 ? "one is" : `${n(c.complete)} are`;
+    return `Too few days to compare yet: that takes two full weeks of days, and ${have} complete so far.`;
+  }
+  if (c.pct === null) {
+    return c.recent === 0
+      ? "No runs in either of the last two weeks."
+      : `No runs the week before — ${runsWord(c.recent)} in the last ${AVG_DAYS} days.`;
+  }
+  const vs = c.recent === c.previous ? `${runsWord(c.recent)} in each` : `${runsWord(c.recent)} vs ${n(c.previous)}`;
+  if (c.dir === "up") return `Up ${n(c.pct)}% on the week before — ${vs}.`;
+  if (c.dir === "down") return `Down ${n(-c.pct)}% on the week before — ${vs}.`;
+  return `No change on the week before — ${vs}.`;
+}
+
+/** The headline change: `+18%`, `−6%` (a true minus), `no change`, or — when
+ *  the week before had no runs — the words instead of a percentage. Null while
+ *  there is nothing to compare. */
+export function deltaFigure(c: WeekCompare): string | null {
+  if (c.kind === "short") return null;
+  if (c.pct === null) return c.recent === 0 ? "no change" : "No runs the week before";
+  if (c.pct > 0) return `+${n(c.pct)}%`;
+  if (c.pct < 0) return `−${n(-c.pct)}%`;
+  return "no change";
+}
+
+/** A per-day average: one decimal while a decimal still matters. */
+export function perDay(v: number): string {
+  return v >= 100 ? n(Math.round(v)) : n(Math.round(v * 10) / 10);
+}
+
+/** Three quiet gridlines from zero, `[0, step, 2 × step]`, the top at or above
+ *  `max` and every step a whole count on a 1-2-2.5-5 style ladder. A window
+ *  with nothing in it still gets an axis, `[0, 1, 2]`, so the flat line is
+ *  drawn against a scale rather than floating. */
+export function yTicks(max: number): [number, number, number] {
+  const half = Math.max(max, 0) / 2;
+  if (!(half > 1)) return [0, 1, 2];
+  const mag = 10 ** Math.floor(Math.log10(half));
+  const ladder = mag >= 10 ? [1, 1.5, 2, 2.5, 3, 4, 5, 6, 8, 10] : [1, 2, 3, 4, 5, 6, 8, 10];
+  const step = ladder.map((m) => m * mag).find((s) => s >= half) ?? 10 * mag;
+  return [0, step, 2 * step];
 }

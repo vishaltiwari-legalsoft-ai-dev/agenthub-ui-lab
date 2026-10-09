@@ -461,10 +461,27 @@ export interface HumansMonth {
   by_user: HumansUser[];
 }
 
+/** One calendar day of agent runs by people. Humans only: scheduled (cron)
+ *  runs are never counted, on any day. */
+export interface HumansDay {
+  /** `YYYY-MM-DD`, a calendar day in the viewer's timezone. */
+  day: string;
+  /** Agent runs people started that day. */
+  runs: number;
+  /** Distinct people who ran anything that day. */
+  people: number;
+}
+
 export interface HumansUsage {
   months: HumansMonth[];
   /** The backend's own sentence about what is left out. Shown verbatim. */
   excluded: string;
+  /** The last 60 calendar days in the viewer's timezone, oldest first, every
+   *  day present (a day nobody ran anything is a zero, not a gap), today last.
+   *  Today is a partial day — it is still going — so it is never a figure to
+   *  compare. Humans only; cron excluded. Additive (2026-10-09): absent on an
+   *  older backend, and then the board offers no trend. */
+  daily?: HumansDay[];
 }
 
 export interface TeamUsage {

@@ -1,12 +1,13 @@
 import { describe, expect, it } from "vitest";
 import { until } from "./format";
-import type { Ask, HumansMonth, TeamReportee } from "@/lib/api";
+import type { Ask, HumansDay, HumansMonth, TeamReportee } from "@/lib/api";
 import {
   STATUS_ACTION, askEmail, askLines, askTitle, askWho, filterAsks, kindLabel, nextStatuses, replaceAsk,
 } from "./asks";
 import {
-  agentChips, boardTabs, dayName, hasExtras, monthLabel, monthShort, monthsNewestFirst, pickTab, rowState,
-  summaryNote, teamSummary, usersByRuns, windowNote,
+  TREND_ID, agentChips, boardTabs, dayName, dayShort, dayWithWeekday, deltaFigure, hasExtras, hasTrend,
+  monthLabel, monthShort, monthsNewestFirst, perDay, pickTab, rowState, summaryNote, teamSummary,
+  trailingAverage, trendSeries, usersByRuns, weekOverWeek, weekSentence, windowNote, yTicks,
 } from "./teamUsage";
 import {
   GEO_AGENT_ID, LIVE_AGENTS, PANELS,
@@ -537,5 +538,187 @@ describe("replaceAsk", () => {
   it("ignores a row it does not hold and never goes below zero", () => {
     expect(replaceAsk(list, askRow({ id: "zz", status: "done" }))).toBe(list);
     expect(replaceAsk({ ...list, new: 0 }, askRow({ id: "a", status: "done" })).new).toBe(0);
+  });
+});
+
+/* ----------------------------------------------------- the daily trend -- */
+/* Joins this module (house rule). The board's "Daily trend": runs by people
+ * a day at a time, today last and partial. Pinned here: the week-over-week
+ * (today never in it), the average line (today never in it either), the
+ * 30/60 window, the sentence, and the fallback when the days stop coming. */
+
+/** `runs`, oldest first, the last of them today (`end`). */
+const daysOf = (runs: readonly number[], end = "2026-10-09"): HumansDay[] => {
+  const [y, m, d] = end.split("-").map(Number);
+  const last = Date.UTC(y, m - 1, d);
+  return runs.map((r, i) => ({
+    day: new Date(last - (runs.length - 1 - i) * 86_400_000).toISOString().slice(0, 10),
+    runs: r,
+    people: Math.min(r, 3),
+  }));
+};
+const TODAY_HUGE = 999; // a partial day that would swing anything it touched
+const PREV_349 = [50, 50, 50, 50, 50, 50, 49];
+const UP_412 = [60, 60, 60, 60, 60, 56, 56];
+const DOWN_328 = [47, 47, 47, 47, 47, 47, 46];
+/** Two filler weeks, then the week before, then the last seven, then today. */
+const twoWeeks = (previous: number[], recent: number[], today = TODAY_HUGE) =>
+  daysOf([...Array<number>(14).fill(5), ...previous, ...recent, today]);
+
+describe("the trend's days", () => {
+  it("names a day the axis way and the readout way, and leaves a non-date alone", () => {
+    expect(dayShort("2026-10-06")).toBe("6 Oct");
+    expect(dayWithWeekday("2026-10-06")).toBe("Tue 6 Oct");
+    expect(dayWithWeekday("2026-10-11")).toBe("Sun 11 Oct");
+    expect(dayWithWeekday("soon")).toBe("soon");
+  });
+
+  it("averages each day with the six before it, and claims nothing until there are seven", () => {
+    const avg = trailingAverage([1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
+    expect(avg.slice(0, 6)).toEqual([null, null, null, null, null, null]);
+    expect(avg[6]).toBe(4);
+    expect(avg[9]).toBe(7);
+  });
+
+  it("marks today as partial and keeps it out of the average line", () => {
+    const days = trendSeries(daysOf([...Array<number>(20).fill(4), TODAY_HUGE]), 30);
+    const today = days[days.length - 1];
+    expect(today.today).toBe(true);
+    expect(today.avg).toBeNull();
+    expect(days.filter((d) => d.today)).toHaveLength(1);
+    // the day before today averages only complete days
+    expect(days[days.length - 2].avg).toBe(4);
+  });
+
+  it("slices 30 or 60 days, today included, with the average carried in from before the window", () => {
+    const sixty = daysOf(Array.from({ length: 60 }, (_, i) => i));
+    const thirty = trendSeries(sixty, 30);
+    expect(thirty).toHaveLength(30);
+    expect(thirty[0].day).toBe(sixty[30].day);
+    expect(thirty[thirty.length - 1].day).toBe("2026-10-09");
+    expect(thirty[0].avg).toBe(27); // days 24..30, a full week behind it
+    const all = trendSeries(sixty, 60);
+    expect(all).toHaveLength(60);
+    expect(all.slice(0, 6).every((d) => d.avg === null)).toBe(true);
+    expect(all[6].avg).toBe(3);
+  });
+
+  it("shows every day it has when there are fewer than the window asks for", () => {
+    expect(trendSeries(daysOf([1, 2, 3]), 30)).toHaveLength(3);
+    expect(trendSeries([], 30)).toEqual([]);
+  });
+
+  it("reads the days oldest first whatever order they arrived in, without touching the payload", () => {
+    const given = daysOf([1, 2, 3]).reverse();
+    const days = trendSeries(given, 30);
+    expect(days.map((d) => d.day)).toEqual(["2026-10-07", "2026-10-08", "2026-10-09"]);
+    expect(days[2].today).toBe(true);
+    expect(given[0].day).toBe("2026-10-09");
+  });
+
+  it("knows weekends and Mondays from the date, not the reader's clock", () => {
+    const days = trendSeries(daysOf([0, 0, 0, 0, 0, 0, 0], "2026-10-11"), 30); // Mon 5 to Sun 11 Oct
+    expect(days.map((d) => d.weekend)).toEqual([false, false, false, false, false, true, true]);
+    expect(days.map((d) => d.monday)).toEqual([true, false, false, false, false, false, false]);
+  });
+});
+
+describe("the week against the week before", () => {
+  it("says up, with the figures", () => {
+    const c = weekOverWeek(twoWeeks(PREV_349, UP_412));
+    expect(c).toMatchObject({ kind: "compare", recent: 412, previous: 349, pct: 18, dir: "up" });
+    expect(deltaFigure(c)).toBe("+18%");
+    expect(weekSentence(c)).toBe("Up 18% on the week before — 412 runs vs 349.");
+  });
+
+  it("says down with a true minus, and never as an alarm word", () => {
+    const c = weekOverWeek(twoWeeks(PREV_349, DOWN_328));
+    expect(c).toMatchObject({ recent: 328, previous: 349, pct: -6, dir: "down" });
+    expect(deltaFigure(c)).toBe("−6%");
+    expect(weekSentence(c)).toBe("Down 6% on the week before — 328 runs vs 349.");
+  });
+
+  it("says no change when the weeks match, or differ by less than half a percent", () => {
+    const same = weekOverWeek(twoWeeks(PREV_349, PREV_349));
+    expect(same).toMatchObject({ pct: 0, dir: "flat" });
+    expect(deltaFigure(same)).toBe("no change");
+    expect(weekSentence(same)).toBe("No change on the week before — 349 runs in each.");
+    const near = weekOverWeek(twoWeeks([143, 143, 143, 143, 143, 143, 143], [143, 143, 143, 143, 143, 143, 142]));
+    expect(near).toMatchObject({ recent: 1000, previous: 1001, pct: 0, dir: "flat" });
+    expect(weekSentence(near)).toBe("No change on the week before — 1,000 runs vs 1,001.");
+  });
+
+  it("gives no percentage when the week before had no runs", () => {
+    const c = weekOverWeek(twoWeeks([0, 0, 0, 0, 0, 0, 0], [1, 0, 2, 0, 0, 0, 0]));
+    expect(c).toMatchObject({ kind: "compare", recent: 3, previous: 0, pct: null, dir: "up" });
+    expect(deltaFigure(c)).toBe("No runs the week before");
+    expect(weekSentence(c)).toBe("No runs the week before — 3 runs in the last 7 days.");
+  });
+
+  it("says so plainly when nobody ran anything, and the chart still has a scale to draw flat against", () => {
+    const daily = daysOf(Array<number>(60).fill(0));
+    const c = weekOverWeek(daily);
+    expect(c).toMatchObject({ recent: 0, previous: 0, pct: null, dir: "flat" });
+    expect(deltaFigure(c)).toBe("no change");
+    expect(weekSentence(c)).toBe("No runs in either of the last two weeks.");
+    const days = trendSeries(daily, 30);
+    expect(days.every((d) => d.runs === 0 && (d.avg === null || d.avg === 0))).toBe(true);
+    expect(yTicks(0)).toEqual([0, 1, 2]);
+  });
+
+  it("does not compare until there are fourteen complete days, and today does not count toward them", () => {
+    const fourteenWithToday = weekOverWeek(daysOf(Array<number>(14).fill(4)));
+    expect(fourteenWithToday).toMatchObject({ kind: "short", complete: 13, days: 7, recent: 28 });
+    expect(deltaFigure(fourteenWithToday)).toBeNull();
+    expect(weekSentence(fourteenWithToday)).toBe(
+      "Too few days to compare yet: that takes two full weeks of days, and 13 are complete so far.",
+    );
+    expect(weekOverWeek(daysOf(Array<number>(15).fill(4))).kind).toBe("compare");
+    const few = weekOverWeek(daysOf([2, 3, 9]));
+    expect(few).toMatchObject({ kind: "short", complete: 2, days: 2, recent: 5 });
+    expect(weekSentence(weekOverWeek(daysOf([9])))).toBe(
+      "Too few days to compare yet: that takes two full weeks of days, and none is complete so far.",
+    );
+  });
+
+  it("leaves today out of both weeks, however big its partial count", () => {
+    const quiet = weekOverWeek(twoWeeks(PREV_349, UP_412, 0));
+    const busy = weekOverWeek(twoWeeks(PREV_349, UP_412, TODAY_HUGE));
+    expect(busy).toEqual(quiet);
+  });
+});
+
+describe("the trend's scale and figures", () => {
+  it("draws three quiet gridlines from zero on whole, readable steps", () => {
+    expect(yTicks(47)).toEqual([0, 25, 50]);
+    expect(yTicks(3)).toEqual([0, 2, 4]);
+    expect(yTicks(9)).toEqual([0, 5, 10]);
+    expect(yTicks(412)).toEqual([0, 250, 500]);
+    expect(yTicks(2)).toEqual([0, 1, 2]);
+    expect(yTicks(Number.NaN)).toEqual([0, 1, 2]);
+  });
+
+  it("writes a per-day average with one decimal while it is small", () => {
+    expect(perDay(81 / 7)).toBe("11.6");
+    expect(perDay(12)).toBe("12");
+    expect(perDay(1204.4)).toBe("1,204");
+  });
+});
+
+describe("whether the board offers the trend", () => {
+  const month = (year_month: string): HumansMonth => ({ year_month, runs: 0, users: 0, by_user: [] });
+  const humans = { months: [month("2026-10"), month("2026-09")], excluded: "Scheduled runs are not counted." };
+
+  it("offers it only when the backend sent days", () => {
+    expect(hasTrend({ humans: null })).toBe(false);
+    expect(hasTrend({ humans })).toBe(false);
+    expect(hasTrend({ humans: { ...humans, daily: [] } })).toBe(false);
+    expect(hasTrend({ humans: { ...humans, daily: daysOf([1]) } })).toBe(true);
+  });
+
+  it("opens the first tab when the trend is remembered but the days are gone", () => {
+    const tabs = boardTabs({ team: null, humans });
+    expect(tabs.map((t): string => t.id)).not.toContain(TREND_ID);
+    expect(pickTab(tabs, TREND_ID)?.id).toBe("m:2026-10");
   });
 });

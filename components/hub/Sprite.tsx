@@ -15,11 +15,11 @@
 
 import type { LucideIcon } from "lucide-react";
 import {
-  Activity, ArrowUp, Bell, BookOpen, Brush, CalendarClock, CalendarDays, Clock,
+  Activity, ArrowDown, ArrowUp, Bell, BookOpen, Brush, CalendarClock, CalendarDays, Clock,
   ChartLine, ChartPie, Check, ChevronRight, CircleDashed, Compass, Database,
   Download, Feather, Files, FileText, Filter, Gauge, Globe, Hash, HeartPulse,
   House, Images, Inbox, Info, Layers, LayoutDashboard, LayoutGrid, Link2, MailPlus,
-  Megaphone, MessageCircle, Moon, NotebookPen, Palette, PenLine, Plug, Plus,
+  Megaphone, MessageCircle, Minus, Moon, NotebookPen, Palette, PenLine, Plug, Plus,
   RotateCcw, Search, SearchCheck, Send, Settings, ShieldCheck,
   SlidersVertical, Sparkles, Store, Sun, Swords, Target, TrendingUp,
   TriangleAlert, Type, UserRound, Wrench, X,
@@ -34,6 +34,8 @@ const ICONS: Record<string, LucideIcon> = {
   // verbs
   plus: Plus, check: Check, x: X, up: ArrowUp, send: Send, download: Download,
   fix: Wrench, tries: RotateCcw, sweep: Sparkles,
+  // direction, for a change on the period before
+  down: ArrowDown, flat: Minus,
   // appearance
   sun: Sun, moon: Moon,
   // the workspaces

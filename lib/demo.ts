@@ -20,7 +20,7 @@ import type {
   InboxStatus, IssuesPayload, LibraryBrand,
   MrConfig, MrConnector, MrLeadAnalysis, MrOverview, MrPortfolio,
   MrReportPeriods, MrRunSummary, MrSheetSources, MrTargets, MrTrends,
-  RunsPage, SeoBrand, SeoOverview, SeoRun, TeamUsage,
+  HumansDay, RunsPage, SeoBrand, SeoOverview, SeoRun, TeamUsage,
 } from "./api";
 
 const NOW = "2026-10-01T09:30:00Z";
@@ -33,6 +33,20 @@ const art = (label: string, a: string, b: string) =>
   `data:image/svg+xml;utf8,${encodeURIComponent(
     `<svg xmlns="http://www.w3.org/2000/svg" width="400" height="400"><defs><linearGradient id="g" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="${a}"/><stop offset="1" stop-color="${b}"/></linearGradient></defs><rect width="400" height="400" fill="url(#g)"/><rect x="24" y="30" width="200" height="22" rx="8" fill="rgba(255,255,255,.92)"/><rect x="24" y="64" width="140" height="22" rx="8" fill="rgba(255,255,255,.8)"/><rect x="24" y="330" width="120" height="36" rx="18" fill="#14161C"/><text x="24" y="310" font-family="sans-serif" font-size="18" fill="rgba(0,0,0,.45)">${label}</text></svg>`,
   )}`;
+
+/** Sixty days of runs by people ending on NOW's date, oldest first, every day
+ *  present: quiet weekends, a slow climb, and today only a morning's worth. */
+const humansDaily = (): HumansDay[] => {
+  const end = Date.UTC(2026, 9, 1);
+  return Array.from({ length: 60 }, (_, i) => {
+    const t = new Date(end - (59 - i) * 86_400_000);
+    const dow = t.getUTCDay();
+    const weekend = dow === 0 || dow === 6;
+    const base = weekend ? 1 + (i % 3) : 6 + Math.round(i / 6) + ((i * 7) % 5);
+    const runs = i === 59 ? 3 : base;
+    return { day: t.toISOString().slice(0, 10), runs, people: Math.min(runs, weekend ? 1 : 2 + (i % 3)) };
+  });
+};
 
 const mention = (rate: number | null, n = 70) => ({
   rate, stdev: rate === null ? null : 0.06, n_prompts: 14, n_answers: n,
@@ -349,6 +363,7 @@ const STATIC: Record<string, Fix> = {
         { year_month: "2026-08", runs: 0, users: 0, by_user: [] },
       ],
       excluded: "Scheduled runs (the cron user) are not counted.",
+      daily: humansDaily(),
     },
   }),
   "/api/library": library,
