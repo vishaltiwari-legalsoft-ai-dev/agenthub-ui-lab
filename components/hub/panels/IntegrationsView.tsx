@@ -29,12 +29,14 @@ import {
 } from "@/lib/api";
 import { loadPending, useLoadSession, type Load } from "@/lib/load";
 import { isLive } from "@/components/console/geo/provenance";
-import { gscIntegration } from "@/components/console/seo/seo";
+import { GA_INTEGRATION, gscIntegration } from "@/components/console/seo/seo";
 import { useHeadline, useHub } from "../context";
 import { n, word } from "../model";
 import { Oops, PageHead, RuleHead, Wait } from "../ui";
 
-type Status = "on" | "partial" | "off";
+/** `info`: access is granted outside this console and nothing here reports
+ *  on it — stated as how it works, never counted as connected or not. */
+type Status = "on" | "partial" | "off" | "info";
 
 interface Hook {
   key: string;
@@ -52,6 +54,7 @@ const TAG: Record<Status, { label: string; cls: string }> = {
   on: { label: "Connected", cls: "is-on" },
   partial: { label: "Similar model", cls: "" },
   off: { label: "Not connected", cls: "" },
+  info: { label: "Admin grants access", cls: "" },
 };
 
 export function IntegrationsView() {
@@ -105,6 +108,17 @@ export function IntegrationsView() {
       note: gsc.note,
       open: gscSection ? () => openWork("seo", "", gscSection) : undefined,
     });
+    // No connect flow and no per-brand status in the overview: a calm row that
+    // says how access works, with no button and no claim either way.
+    hooks.push({
+      key: "ga",
+      glyph: "GA",
+      name: GA_INTEGRATION.name,
+      what: GA_INTEGRATION.what,
+      usedByLabel: "Read by",
+      usedBy: GA_INTEGRATION.usedBy,
+      status: "info",
+    });
     hooks.push({
       key: "serp",
       glyph: "SR",
@@ -135,6 +149,7 @@ export function IntegrationsView() {
   const on = hooks.filter((h) => h.status === "on");
   const partial = hooks.filter((h) => h.status === "partial");
   const off = hooks.filter((h) => h.status === "off");
+  const info = hooks.filter((h) => h.status === "info");
 
   useHeadline(
     hooks.length
@@ -215,6 +230,17 @@ export function IntegrationsView() {
             aside={<span className="aside">{off.length}</span>}
           />
           <div className="hooks">{off.map((h) => <HookRow key={h.key} hook={h} />)}</div>
+        </section>
+      )}
+
+      {info.length > 0 && (
+        <section className="band">
+          <RuleHead
+            title="Granted by an admin"
+            note="No connect button here: access is given on the service's own side."
+            aside={<span className="aside">{info.length}</span>}
+          />
+          <div className="hooks">{info.map((h) => <HookRow key={h.key} hook={h} />)}</div>
         </section>
       )}
     </>

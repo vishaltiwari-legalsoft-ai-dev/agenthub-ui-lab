@@ -26,7 +26,8 @@
  */
 
 import type {
-  SeoAuditIssue, SeoBrief, SeoGscStatus, SeoOverview, SeoPageIntel, SeoPagesGrounding, SeoReviewGrounding, SeoTopic,
+  SeoAuditIssue, SeoBrandCard, SeoBrief, SeoGscStatus, SeoOverview, SeoPageIntel, SeoPagesGrounding, SeoReviewGrounding,
+  SeoTopic,
 } from "@/lib/api";
 // Values come in by relative path: the test suite runs without the `@/` alias,
 // which only erased type imports can use.
@@ -47,6 +48,15 @@ export const GSC_MISMATCH = "Search Console connection is for a different site �
 /** Google Analytics has no connect flow — it is never drawn as a button. */
 export const GA_SERVICE_ACCOUNT =
   "Google Analytics is read through our service account — a GA admin adds it as a Viewer on the property.";
+
+/** The Integrations row for Google Analytics. There is no connect flow and
+ *  no per-brand status in the overview, so the row states how access works
+ *  and claims nothing else — no button, no Connected / Not connected. */
+export const GA_INTEGRATION = {
+  name: "Google Analytics",
+  what: "Read through our service account; a GA admin adds it as a Viewer on each property.",
+  usedBy: "SEO Analyst",
+} as const;
 
 /** A brand's Search Console block with every field present. `fallbackConnected`
  *  is the card's legacy `gsc_connected`, for a backend that sends no block.
@@ -266,6 +276,12 @@ export interface GscReturnFlags {
 }
 
 export const NO_GSC_RETURN: GscReturnFlags = { connected: false, code: null };
+
+/** Whether the return toast has to wait for the overview: the success line
+ *  names the brand, and `gsc_no_property` names its domain. Every other
+ *  code's sentence is fixed, so it is said the moment the page opens. */
+export const returnNeedsOverview = (f: GscReturnFlags): boolean =>
+  f.connected || f.code === "gsc_no_property";
 
 /** The code `gscReturnPath` left on the hash, read back by the workspace.
  *  Anything else on the link is ignored; a value that is not a code shape
@@ -645,4 +661,30 @@ export function planHeading(n: number): string | null {
   if (n <= 0) return null;
   if (n === 1) return "This week — do this one";
   return `This week — do these ${["two", "three"][Math.min(n, 3) - 2]}`;
+}
+
+/* ------------------------------------------- the workspace and its console -- */
+/* The workspace's header and brand switcher name one brand; the console shows
+ * one brand (or the list). They used to disagree: the header followed the
+ * address bar while the console opened brands on its own. Now the console
+ * reports what it opens, the address bar follows it, and the header names
+ * what the console shows. */
+
+/** The header while the console section is open: the brand on screen, or
+ *  "all brands" while the console shows its list. */
+export function consoleHeadline(shown: string | null, brands: readonly SeoBrandCard[]): string {
+  if (!shown) return "all brands";
+  const b = brands.find((c) => c.brand.id === shown)?.brand;
+  return b ? `${b.name} · ${b.domain}` : "reading the brand";
+}
+
+/** Whether a change of the workspace's subject should open that brand in
+ *  the console: only a change made while the console was already open (the
+ *  brand switcher), and only to a brand the console is not already showing.
+ *  Moving between sections never opens anything by itself. */
+export function subjectOpensInConsole(t: {
+  prevSubject: string; subject: string; prevSection: string; section: string; shown: string | null;
+}): boolean {
+  return t.prevSection === "console" && t.section === "console"
+    && t.subject !== t.prevSubject && !!t.subject && t.subject !== t.shown;
 }

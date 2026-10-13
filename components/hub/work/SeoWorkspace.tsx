@@ -9,12 +9,14 @@
  *  surface grows.
  */
 
-import { useCallback, useEffect, useState } from "react";
-import { seoOverview, type SeoOverview } from "@/lib/api";
+import { useCallback, useEffect, useRef, useState } from "react";
+import type { SeoOverview } from "@/lib/api";
 import {
-  canConnectGsc, gscReturnSentence, NO_GSC_RETURN, plainMessage, readGscReturn, type GscReturnFlags,
+  canConnectGsc, consoleHeadline, gscReturnSentence, NO_GSC_RETURN, plainMessage, readGscReturn, returnNeedsOverview,
+  subjectOpensInConsole, type GscReturnFlags,
 } from "@/components/console/seo/seo";
-import { loadPending, useLoadSession, type Load } from "@/lib/load";
+import { loadSeoOverview, onSeoOverview } from "@/components/console/seo/overview";
+import { loadPending, loadReady, useLoadSession, type Load } from "@/lib/load";
 import { useHeadline, useHub, useWorkNav, type WorkSection } from "../context";
 import { initials } from "../model";
 import { Blank, Oops, Wait } from "../ui";
@@ -55,29 +57,67 @@ export function SeoWorkspace({ subject, section }: { subject: string; section: s
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // One overview read per page load: the console mounts at the same moment
+  // and joins this read instead of issuing its own (`overview.ts`). A
+  // revision bump or a retry asks for a fresh one.
+  const firstRevision = useRef(revision);
   useEffect(() => {
+    const fresh = beat > 0 || revision !== firstRevision.current;
     void session.run(
       "seo-overview",
-      (s) => seoOverview({ signal: s }),
+      (s) => loadSeoOverview({ signal: s, fresh }),
       setOv,
       "The brands could not be read.",
       { keepStale: true },
     );
   }, [session, revision, beat]);
+  // …and hears every newer read, so a brand the console adds or removes
+  // reaches the header and the brand switcher.
+  useEffect(() => onSeoOverview((next) => setOv(loadReady(next))), []);
 
   const brands = ov.data?.brands || [];
   const card = brands.find((b) => b.brand.id === subject) || brands[0] || null;
   const brandId = card?.brand.id || "";
   const sec = SECTIONS.some((s) => s.id === section) ? section : "dashboard";
 
-  useHeadline(card ? `${card.brand.name} · ${card.brand.domain}` : "reading the brands");
+  /** The brand the console is opening or showing (null: its list). */
+  const [shown, setShown] = useState<string | null>(null);
+  const shownRef = useRef<string | null>(null);
+  const subjectRef = useRef(subject);
+  subjectRef.current = subject;
+  // The console reports the brand it opens; the address bar — and with it
+  // the header and the brand switcher — follows.
+  const onBrandChange = useCallback((id: string | null) => {
+    shownRef.current = id;
+    setShown(id);
+    if (id && id !== subjectRef.current) openWork("seo", id, "console");
+  }, [openWork]);
+  // A brand picked in the switcher while the console is open is opened there.
+  const prev = useRef({ subject, section: sec });
+  useEffect(() => {
+    const was = prev.current;
+    prev.current = { subject, section: sec };
+    // The console unmounts with its section; it reopens on its list.
+    if (sec !== "console" && shownRef.current !== null) {
+      shownRef.current = null;
+      setShown(null);
+    }
+    if (subjectOpensInConsole({
+      prevSubject: was.subject, subject, prevSection: was.section, section: sec, shown: shownRef.current,
+    })) setFocus(subject);
+  }, [subject, sec]);
+
+  useHeadline(sec === "console"
+    ? consoleHeadline(shown, brands)
+    : card ? `${card.brand.name} · ${card.brand.domain}` : "reading the brands");
 
   // The link carries a code, never a sentence: the words come from
-  // `gscReturnSentence`, and the brand's name and domain from the overview —
-  // so both toasts wait for that read (or its failure).
+  // `gscReturnSentence`. Most codes' sentences are fixed and are said at
+  // once; the success line (the brand's name) and gsc_no_property (its
+  // domain) wait for the overview read — or its failure.
   useEffect(() => {
     if (!ret.connected && ret.code === null) return;
-    if (ov.phase === "loading") return;
+    if (returnNeedsOverview(ret) && ov.phase === "loading") return;
     const known = brands.find((b) => b.brand.id === subject)?.brand;
     if (ret.code !== null) {
       toast(gscReturnSentence(ret.code, known?.domain), "error");
@@ -100,7 +140,8 @@ export function SeoWorkspace({ subject, section }: { subject: string; section: s
   if (sec === "console") {
     return (
       <div className="legacy">
-        <SeoAgent onToast={toast} onBack={closeWork} focusBrand={focus} onFocused={releaseFocus} />
+        <SeoAgent onToast={toast} onBack={closeWork} focusBrand={focus} onFocused={releaseFocus}
+                  onBrandChange={onBrandChange} />
       </div>
     );
   }

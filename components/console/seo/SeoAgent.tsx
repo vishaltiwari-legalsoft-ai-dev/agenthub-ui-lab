@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import {
-  seoAnalyzeSite, seoBrandDetail, seoDeleteBrand, seoOauthDisconnect, seoOauthStart, seoOverview,
+  seoAnalyzeSite, seoBrandDetail, seoDeleteBrand, seoOauthDisconnect, seoOauthStart,
   seoPages, seoPagesRefresh, seoRunBrand, seoSaveBrand, seoSetTodoStatus,
   type SeoBrand, type SeoGa, type SeoGscStatus, type SeoOverview, type SeoPagesDoc, type SeoPlanItem,
   type SeoRun, type SeoSiteReview, type SeoTodoStatus, type SeoTopic,
@@ -12,6 +12,7 @@ import { useAuth } from "@/lib/auth";
 import { Icon } from "@/lib/kit-ui";
 import { useLoadSession } from "@/lib/load";
 import { AskView, AuditView, BriefsView, CompetitorsView, KeywordsView, UpdatePlanButton } from "./labs";
+import { loadSeoOverview } from "./overview";
 import {
   gscFailure, gscSlot, notShownLine, plainFailure, plainMessage, plainNotes, readGsc, todoPage, topicOrigin,
   type NoteContext,
@@ -325,7 +326,7 @@ function AddBrandForm({ onSaved, onToast }: { onSaved: () => void; onToast: Toas
   );
 }
 
-export function SeoAgent({ onToast, onBack, focusBrand, onFocused }: {
+export function SeoAgent({ onToast, onBack, focusBrand, onFocused, onBrandChange }: {
   onToast: ToastFn;
   onBack: () => void;
   /** A brand to open on arrival — set by the workspace when Google sends the
@@ -335,6 +336,9 @@ export function SeoAgent({ onToast, onBack, focusBrand, onFocused }: {
   /** Called once `focusBrand` is being opened, so the workspace can let go of
    *  it and a later visit to the console starts at the brand list again. */
   onFocused?: () => void;
+  /** The brand the console is opening or showing — null for the list — so
+   *  the workspace's header and brand switcher follow it. */
+  onBrandChange?: (id: string | null) => void;
 }) {
   const { user } = useAuth();
   const [overview, setOverview] = useState<SeoOverview | null>(null);
@@ -358,10 +362,12 @@ export function SeoAgent({ onToast, onBack, focusBrand, onFocused }: {
 
   const session = useLoadSession();
 
-  const refreshOverview = useCallback(async () => {
+  /** `fresh` after a write that changes the brands; the first read joins the
+   *  workspace's, so a page load asks the backend once (`overview.ts`). */
+  const refreshOverview = useCallback(async (fresh = true) => {
     const attempt = session.begin("overview");
     try {
-      const next = await seoOverview();
+      const next = await loadSeoOverview({ signal: attempt.signal, fresh });
       if (attempt.current()) setOverview(next);
     } catch (e) {
       const message = attempt.failure(e, "Couldn't load the SEO overview");
@@ -369,7 +375,7 @@ export function SeoAgent({ onToast, onBack, focusBrand, onFocused }: {
     }
   }, [onToast, session]);
 
-  useEffect(() => { void refreshOverview(); }, [refreshOverview]);
+  useEffect(() => { void refreshOverview(false); }, [refreshOverview]);
 
   /** The brand actually on screen. A ref, not the `brand` state: these handlers
    *  resume after an await and their captured `brand` is whatever it was when
@@ -382,9 +388,17 @@ export function SeoAgent({ onToast, onBack, focusBrand, onFocused }: {
    *  panel below B's name is A's data. This was one of only three modules that
    *  got that right by hand; the slot is the same discipline, minus the
    *  `RequestSequence` ref and the unmount cleanup it needed. */
+  /** Back to the brand list. */
+  function closeBrand() {
+    setBrand(null);
+    setRun(null);
+    onBrandChange?.(null);
+  }
+
   async function openBrand(id: string) {
     const attempt = session.begin("brand");
     setOpening(id);
+    onBrandChange?.(id);
     try {
       const detail = await seoBrandDetail(id, { signal: attempt.signal });
       if (!attempt.current()) return; // a newer brand owns the screen
@@ -410,6 +424,8 @@ export function SeoAgent({ onToast, onBack, focusBrand, onFocused }: {
         onToast(msg, "error");
       }
     } catch (e) {
+      // the brand did not open: the header goes back to what is on screen
+      if (attempt.current()) onBrandChange?.(shownBrandId.current);
       const msg = attempt.failure(e, "Failed to load brand");
       if (msg) onToast(plainMessage(msg, "Failed to load brand"), "error");
     } finally {
@@ -526,7 +542,7 @@ export function SeoAgent({ onToast, onBack, focusBrand, onFocused }: {
     try {
       await seoDeleteBrand(b.id);
       onToast(`${b.name} removed`);
-      setBrand(null); setRun(null);
+      closeBrand();
       await refreshOverview();
     } catch (e) {
       onToast(plainFailure(e, "Remove failed"), "error");
@@ -554,7 +570,7 @@ export function SeoAgent({ onToast, onBack, focusBrand, onFocused }: {
   return (
     <div className="mr-app seo-app">
       <header className="mr-top">
-        <button className="mr-top__back" onClick={() => (brand ? (setBrand(null), setRun(null)) : onBack())} aria-label="Back">
+        <button className="mr-top__back" onClick={() => (brand ? closeBrand() : onBack())} aria-label="Back">
           <Icon name="arrow-left" size={18} />
         </button>
         <div className="mr-top__id">

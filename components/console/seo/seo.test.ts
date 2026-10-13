@@ -5,19 +5,21 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { SeoAuditIssue, SeoBrandCard, SeoPageIntel, SeoTopic } from "@/lib/api";
 import {
-  API_URL, ApiError, apiCode, RequestTimeoutError, seoBrandDetail, seoOauthComplete, seoOauthDisconnect, seoOauthStart,
+  API_URL, ApiError, apiCode, isAbortError, RequestTimeoutError, seoBrandDetail, seoOauthComplete, seoOauthDisconnect, seoOauthStart,
   seoPages, seoPagesRefresh, seoSetTodoStatus,
 } from "../../../lib/api";
 import { describeFailure } from "../../../lib/load";
 import {
   auditEvidence, auditTone, briefSchema, canConnectGsc, connectedLine, finishGoogleReturn, flagChip,
-  GA_SERVICE_ACCOUNT, GSC_CANCELLED, GSC_MISMATCH, pageChips, GSC_CONNECT_HINT, GSC_CONNECT_UNAVAILABLE, GSC_RETRY, GSC_UNFINISHED, gscFailure,
+  consoleHeadline, GA_INTEGRATION, GA_SERVICE_ACCOUNT, GSC_CANCELLED, GSC_MISMATCH, pageChips, returnNeedsOverview,
+  subjectOpensInConsole, GSC_CONNECT_HINT, GSC_CONNECT_UNAVAILABLE, GSC_RETRY, GSC_UNFINISHED, gscFailure,
   gscIntegration, gscReturnSentence,
   gscNotice, gscReturnPath, gscSlot, gscStateBrand, googleReturn, hiddenSuggestionsLine, looksRaw,
   NO_GSC_RETURN, notShownLine, pageRec, planHeading, plainFailure, plainMessage, plainNote, plainNotes, PLAIN_TOPIC_NOTES, readGsc,
   readGscReturn, reviewDropped, todoPage, topicOrigin, type GoogleReturnIO, type NoteContext,
 } from "./seo";
 import { AuditIssueRow, BriefSchema, HiddenSuggestions, PageRow, PlanStrip, ReviewDropped } from "./rows";
+import { loadSeoOverview, onSeoOverview } from "./overview";
 
 /* Every Search Console, degraded-note and topic-provenance sentence the SEO
  * screens put up follows from these functions, so this pins what each payload
@@ -952,5 +954,172 @@ describe("a GEO-only caller's overview: no gsc block, no gsc_connected", () => {
     expect(agent).toContain("readGsc(gscCard, gsc_connected).connected");
     expect(dash).toContain("readGsc(card.gsc, card.gsc_connected)");
     for (const src of [agent, dash]) expect(src).not.toMatch(/card\.gsc\.|gscCard\.|gsc_connected &&/);
+  });
+});
+
+/* ------------------------------------------------ round 2: D6, D7, D8 -- */
+
+/** A backend whose overview replies arrive only when the test says so. */
+function deferredOverviews() {
+  const pending: ((body: unknown) => void)[] = [];
+  const fetchMock = vi.fn((url: string) => new Promise<Response>((resolve) => {
+    expect(String(url)).toContain("/api/seo-geo/overview");
+    pending.push((body) => resolve(new Response(JSON.stringify(body), { status: 200, headers: { "Content-Type": "application/json" } })));
+  }));
+  vi.stubGlobal("fetch", fetchMock);
+  return { fetchMock, reply: (i: number, body: unknown) => pending[i](body) };
+}
+const OV = (tag: string) => ({ sources: { gsc: false, serp: true }, brands: [], tag });
+const settle = () => new Promise((r) => setTimeout(r, 0));
+
+describe("D6 — one overview read per page load", () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  it("the workspace and the console share one request", async () => {
+    const { fetchMock, reply } = deferredOverviews();
+    const a = loadSeoOverview();
+    const b = loadSeoOverview({ signal: new AbortController().signal });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    reply(0, OV("one"));
+    expect(await a).toEqual(await b);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("one caller giving up does not cancel the request for the others", async () => {
+    const { fetchMock, reply } = deferredOverviews();
+    const ctrl = new AbortController();
+    const quitter = loadSeoOverview({ signal: ctrl.signal });
+    const stayer = loadSeoOverview();
+    ctrl.abort();
+    const gaveUp = await quitter.catch((e: unknown) => e);
+    expect(isAbortError(gaveUp)).toBe(true);
+    reply(0, OV("kept"));
+    expect(await stayer).toMatchObject({ tag: "kept" });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    // a caller that had already given up starts nothing
+    const before = fetchMock.mock.calls.length;
+    const dead = new AbortController();
+    dead.abort();
+    expect(isAbortError(await loadSeoOverview({ signal: dead.signal }).catch((e: unknown) => e))).toBe(true);
+    expect(fetchMock.mock.calls.length).toBe(before);
+  });
+
+  it("keeps nothing once a read settles — the next load reads again", async () => {
+    const { fetchMock, reply } = deferredOverviews();
+    const first = loadSeoOverview();
+    reply(0, OV("first"));
+    await first;
+    await settle();
+    const second = loadSeoOverview();
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    reply(1, OV("second"));
+    expect(await second).toMatchObject({ tag: "second" });
+  });
+
+  it("a fresh read after a write publishes, and an older reply never overwrites it", async () => {
+    const { reply } = deferredOverviews();
+    const heard: unknown[] = [];
+    const off = onSeoOverview((o) => heard.push((o as unknown as { tag: string }).tag));
+    const stale = loadSeoOverview();
+    const fresh = loadSeoOverview({ fresh: true });
+    reply(1, OV("fresh"));
+    await fresh;
+    reply(0, OV("stale"));
+    await stale;
+    await settle();
+    expect(heard).toEqual(["fresh"]);
+    off();
+    const after = loadSeoOverview({ fresh: true });
+    reply(2, OV("unheard"));
+    await after;
+    await settle();
+    expect(heard).toEqual(["fresh"]);
+  });
+
+  it("a failed read reaches every caller, and the next call tries again", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => new Response("{}", { status: 500 })));
+    const [a, b] = [loadSeoOverview(), loadSeoOverview()];
+    expect((await a.catch((e: unknown) => e)) instanceof ApiError).toBe(true);
+    expect((await b.catch((e: unknown) => e)) instanceof ApiError).toBe(true);
+    await settle();
+    const fetchMock = vi.fn(async () => new Response(JSON.stringify(OV("ok")), { status: 200, headers: { "Content-Type": "application/json" } }));
+    vi.stubGlobal("fetch", fetchMock);
+    expect(await loadSeoOverview()).toMatchObject({ tag: "ok" });
+  });
+
+  it("says a fixed sentence at once; only the brand name or domain waits for the overview", () => {
+    expect(returnNeedsOverview({ connected: true, code: null })).toBe(true);
+    expect(returnNeedsOverview({ connected: false, code: "gsc_no_property" })).toBe(true);
+    for (const code of ["cancelled", "google_error", "gsc_state_expired", "gsc_property_taken", "unknown"]) {
+      expect(returnNeedsOverview({ connected: false, code }), code).toBe(false);
+    }
+  });
+
+  it("both screens read the overview through the shared loader", () => {
+    const ws = readFileSync(join(__dirname, "../../hub/work/SeoWorkspace.tsx"), "utf8");
+    const agent = readFileSync(join(__dirname, "SeoAgent.tsx"), "utf8");
+    for (const src of [ws, agent]) expect(src).not.toMatch(/\bseoOverview\(/);
+    expect(ws).toContain("loadSeoOverview({ signal: s, fresh })");
+    expect(ws).toContain("onSeoOverview(");
+    expect(ws).toContain("if (returnNeedsOverview(ret) && ov.phase === \"loading\") return;");
+    expect(agent).toContain("loadSeoOverview({ signal: attempt.signal, fresh })");
+    expect(agent).toContain("void refreshOverview(false);");
+  });
+});
+
+describe("D7 — the header follows the brand open in the console", () => {
+  const card = (id: string, name: string, domain: string): SeoBrandCard => ({
+    brand: { id, name, domain, gsc_property: "", seeds: [], enabled: true }, headline: null, last_run: null,
+  });
+  const brands = [card("legalsoft", "Legal Soft", "legalsoft.com"), card("verify-seo-1014", "verify-seo-1014", "legalsoft.com")];
+
+  it("names the brand on screen, or all brands for the list", () => {
+    expect(consoleHeadline("verify-seo-1014", brands)).toBe("verify-seo-1014 · legalsoft.com");
+    expect(consoleHeadline(null, brands)).toBe("all brands");
+    expect(consoleHeadline("just-added", brands)).toBe("reading the brand");
+  });
+
+  it("opens a brand picked in the switcher only while the console is open", () => {
+    const base = { prevSubject: "legalsoft", subject: "verify-seo-1014", prevSection: "console", section: "console", shown: "legalsoft" };
+    expect(subjectOpensInConsole(base)).toBe(true);
+    // the console itself just opened it (the address bar followed the console)
+    expect(subjectOpensInConsole({ ...base, shown: "verify-seo-1014" })).toBe(false);
+    // moving between sections opens nothing by itself
+    expect(subjectOpensInConsole({ ...base, prevSection: "dashboard" })).toBe(false);
+    expect(subjectOpensInConsole({ ...base, section: "dashboard" })).toBe(false);
+    expect(subjectOpensInConsole({ ...base, subject: "legalsoft" })).toBe(false);
+    expect(subjectOpensInConsole({ ...base, subject: "" })).toBe(false);
+  });
+
+  it("the console reports what it opens, and the workspace follows it", () => {
+    const agent = readFileSync(join(__dirname, "SeoAgent.tsx"), "utf8");
+    const ws = readFileSync(join(__dirname, "../../hub/work/SeoWorkspace.tsx"), "utf8");
+    expect(agent).toMatch(/setOpening\(id\);\s*onBrandChange\?\.\(id\);/);
+    expect(agent).toMatch(/function closeBrand\(\) \{\s*setBrand\(null\);\s*setRun\(null\);\s*onBrandChange\?\.\(null\);/);
+    expect(agent).not.toContain("setBrand(null), setRun(null)");
+    expect(ws).toContain("onBrandChange={onBrandChange}");
+    expect(ws).toContain('if (id && id !== subjectRef.current) openWork("seo", id, "console");');
+    expect(ws).toMatch(/useHeadline\(sec === "console"\s*\? consoleHeadline\(shown, brands\)/);
+  });
+});
+
+describe("D8 — Google Analytics on Integrations", () => {
+  it("is a calm row that says how access works", () => {
+    expect(GA_INTEGRATION).toEqual({
+      name: "Google Analytics",
+      what: "Read through our service account; a GA admin adds it as a Viewer on each property.",
+      usedBy: "SEO Analyst",
+    });
+  });
+
+  it("has no button and no Connected / Not connected claim", () => {
+    const src = readFileSync(join(__dirname, "../../hub/panels/IntegrationsView.tsx"), "utf8");
+    const row = src.slice(src.indexOf('key: "ga"'), src.indexOf('key: "serp"'));
+    expect(row).toContain('status: "info"');
+    expect(row).not.toContain("open:");
+    // info rows are neither counted as connected nor as not
+    expect(src).toContain('const on = hooks.filter((h) => h.status === "on");');
+    expect(src).toContain('const off = hooks.filter((h) => h.status === "off");');
+    expect(src).toContain('info: { label: "Admin grants access", cls: "" }');
   });
 });
