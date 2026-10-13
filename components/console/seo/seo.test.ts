@@ -4,13 +4,13 @@ import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { SeoAuditIssue, SeoPageIntel, SeoTopic } from "@/lib/api";
-import { ApiError, apiCode, seoOauthComplete, seoOauthStart } from "../../../lib/api";
+import { ApiError, apiCode, RequestTimeoutError, seoOauthComplete, seoOauthStart } from "../../../lib/api";
 import { describeFailure } from "../../../lib/load";
 import {
   auditEvidence, auditTone, briefSchema, canConnectGsc, connectedLine, finishGoogleReturn, flagChip,
-  GA_SERVICE_ACCOUNT, GSC_CANCELLED, GSC_CONNECT_HINT, GSC_CONNECT_UNAVAILABLE, gscFailure, gscIntegration,
+  GA_SERVICE_ACCOUNT, GSC_CANCELLED, GSC_CONNECT_HINT, GSC_CONNECT_UNAVAILABLE, GSC_UNFINISHED, gscFailure, gscIntegration,
   gscNotice, gscReturnPath, gscSlot, gscStateBrand, googleReturn, hiddenSuggestionsLine, looksRaw,
-  NO_GSC_RETURN, notShownLine, pageRec, planHeading, plainNote, plainNotes, PLAIN_TOPIC_NOTES, readGsc,
+  NO_GSC_RETURN, notShownLine, pageRec, planHeading, plainFailure, plainMessage, plainNote, plainNotes, PLAIN_TOPIC_NOTES, readGsc,
   readGscReturn, reviewDropped, todoPage, topicOrigin, type GoogleReturnIO, type NoteContext,
 } from "./seo";
 import { AuditIssueRow, BriefSchema, HiddenSuggestions, PageRow, PlanStrip, ReviewDropped } from "./rows";
@@ -315,7 +315,7 @@ describe("plainNote — never the exception text", () => {
 describe("plainNotes", () => {
   it("says each thing once, skips junk, and survives a missing list", () => {
     expect(plainNotes(["Serper: a", "Serper: b", 7, null, "  ", PLAIN_TOPIC_NOTES[0]], CTX)).toEqual([
-      "Live Google checks aren't available on this server right now, so blog topics come from our own search data only.",
+      "Live Google results weren't available for part of this — what's shown is what came back.",
       PLAIN_TOPIC_NOTES[0],
     ]);
     expect(plainNotes(undefined, CTX)).toEqual([]);
@@ -581,5 +581,111 @@ describe("fix list: page links, the cut, and briefs' schema", () => {
     expect(agent).toContain("<ReviewDropped grounding={siteReview.grounding} />");
     expect(labs).toContain("<AuditIssueRow");
     expect(labs).toContain("<BriefSchema brief={b} />");
+  });
+});
+
+/* ------------------------------------ no raw text anywhere (follow-up) -- */
+/* Every note the labs write — the keyword map, competitor profiles and
+ * tracking, briefs — and every failure the SEO screens report, as the backend
+ * actually words them today. None of it may reach the reader raw. */
+
+const LAB_NOTES = [
+  "Serper: HTTPError('403 Client Error: Forbidden for url: https://google.serper.dev/search')",
+  "Serper key missing — expansion limited to the LLM and our own search data",
+  "LLM expansion skipped: CredentialMissing('offline mode')",
+  "LLM returned no usable clusters — heuristic grouping used",
+  "LLM clustering skipped (ValueError('Expecting value: line 1 column 1')) — heuristic grouping used",
+  "Sitemap watch: ConnectTimeout(<urllib3.connection.HTTPSConnection object at 0x7f>)",
+  "Page fetch https://rival.com/blog/post: <HTTPError 404: 'Not Found'>",
+  "Serper rival.com: ReadTimeout('read timed out')",
+  "LLM outline skipped (CredentialMissing('offline mode')) — structural outline from SERP data",
+  "Serper key missing — topics built from Search Console data only",
+];
+
+describe("lab notes — keyword map, competitors, briefs", () => {
+  it("turns every note the labs write into words, with no vendor, model or exception in them", () => {
+    for (const raw of LAB_NOTES) {
+      const s = plainNote(raw, CTX);
+      expect(looksRaw(s), `${raw} → ${s}`).toBe(false);
+      expect(s, raw).not.toMatch(/Serper|LLM|heuristic|Error|Timeout|https?:|0x7f|rival\.com/);
+    }
+  });
+
+  it("keeps each sentence true where its prefix appears", () => {
+    expect(plainNote("Serper key missing — topics built from Search Console data only", CTX)).toContain("blog topics");
+    expect(plainNote("Serper key missing — expansion limited to the LLM and our own search data", CTX)).toContain("keyword ideas");
+    // competitor profiles and the keyword map share the bare `Serper` prefix:
+    // the sentence must not claim to be about blog topics
+    expect(plainNote("Serper rival.com: ReadTimeout()", CTX)).not.toContain("blog");
+    expect(plainNote("LLM clustering skipped (x) — heuristic grouping used", CTX))
+      .toBe(plainNote("LLM returned no usable clusters — heuristic grouping used", CTX));
+  });
+
+  it("the labs route every note and toast through it", () => {
+    const labs = readFileSync(join(__dirname, "labs.tsx"), "utf8");
+    expect(labs).toContain("const errMsg = plainFailure;");
+    expect(labs).not.toContain("res.degraded[0]");
+    expect(labs).not.toContain("doc.notes[0]");
+    expect(labs).not.toMatch(/<Notes notes=\{[^}]*\} \/>/); // every <Notes> carries its ctx
+    expect(labs.match(/<Notes notes=\{[^}]*\} ctx=\{noteCtx\} \/>/g)).toHaveLength(3);
+    for (const file of ["labs.tsx", "SeoAgent.tsx"]) {
+      expect(readFileSync(join(__dirname, file), "utf8"), file).not.toContain("describeFailure(");
+    }
+  });
+});
+
+describe("plainMessage / plainFailure — failures in words", () => {
+  it("replaces a raw 503 detail with the caller's fallback", () => {
+    const raw = "Google Analytics rejected properties/123: <HttpError 403 when requesting https://analyticsdata.googleapis.com/v1beta returned \"denied\">";
+    expect(plainMessage(raw, "Could not refresh pages")).toBe("Could not refresh pages");
+    expect(plainFailure(new ApiError(raw, 503, { detail: raw }), "Could not refresh pages")).toBe("Could not refresh pages");
+    expect(plainMessage("Site review needs the AI model: RuntimeError('x')", "Site analysis failed")).toBe("Site analysis failed");
+    expect(plainMessage("Status must be one of ['assigned', 'done', 'todo']", "Could not save status")).toBe("Could not save status");
+  });
+
+  it("lets a plain refusal, a timeout and a coded message through untouched", () => {
+    expect(plainMessage("Run the site analysis first", "x")).toBe("Run the site analysis first");
+    const timeout = new RequestTimeoutError(90_000);
+    expect(plainFailure(timeout, "x")).toBe(timeout.message);
+    const coded = "This Google account has no Search Console access to berry.com — sign in with an account that does, or ask the site owner to add it.";
+    expect(plainFailure(new ApiError(coded, 422, { detail: { code: "gsc_no_property", message: coded } }), "x")).toBe(coded);
+    expect(plainMessage("", "fallback")).toBe("fallback");
+    expect(plainMessage(null, "")).toBe("");
+  });
+
+  it("will not toast markup someone put in the return link", () => {
+    expect(plainMessage("<img src=x onerror=alert(1)>", GSC_UNFINISHED)).toBe(GSC_UNFINISHED);
+    const why = "Google didn't grant read access to Search Console — connect again and allow it.";
+    expect(plainMessage(readGscReturn(gscReturnPath("b", { error: why }).slice(1)).error, GSC_UNFINISHED)).toBe(why);
+  });
+});
+
+describe("chips the integration is moving out of the row sentences", () => {
+  it("labels healthy and thin-content properly, not with the generic fallback", () => {
+    expect(flagChip("healthy")).toEqual({ label: "Healthy", ok: true });
+    expect(flagChip("thin-content")).toEqual({ label: "Thin content", ok: false });
+    expect(flagChip("thin")).toEqual({ label: "Thin content", ok: false });
+  });
+
+  it("renders a flags row of them with no sentence under it", () => {
+    const out = html(createElement(PageRow, { p: page({ rec_source: "flags", recommendation: "", flags: ["healthy"] }) }));
+    expect(out).toContain('<span class="seo-chip seo-chip--on">Healthy</span>');
+    expect(out).not.toContain("Rule:");
+    expect(html(createElement(PageRow, { p: page({ rec_source: "flags", recommendation: "", flags: ["thin-content"] }) })))
+      .toContain('<span class="seo-chip seo-chip--sev-medium">Thin content</span>');
+  });
+});
+
+describe("the dashboard opens the console on its brand", () => {
+  it("routes every console link through the workspace's focus, and the console lets go of it", () => {
+    const dash = readFileSync(join(__dirname, "../../hub/work/seo/SeoDashboard.tsx"), "utf8");
+    const ws = readFileSync(join(__dirname, "../../hub/work/SeoWorkspace.tsx"), "utf8");
+    const agent = readFileSync(join(__dirname, "SeoAgent.tsx"), "utf8");
+    expect(dash).not.toContain('openWork("seo", brandId, "console")');
+    expect(dash.match(/onOpenConsole\(brandId\)/g)).toHaveLength(3);
+    expect(ws).toContain("onOpenConsole={openInConsole}");
+    expect(ws).toContain("focusBrand={focus} onFocused={releaseFocus}");
+    expect(ws).toMatch(/setFocus\(id\);\s*openWork\("seo", id, "console"\);/);
+    expect(agent).toMatch(/void openBrand\(focusBrand\);\s*onFocused\?\.\(\);/);
   });
 });

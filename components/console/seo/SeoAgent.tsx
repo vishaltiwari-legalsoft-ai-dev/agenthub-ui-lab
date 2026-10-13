@@ -10,9 +10,12 @@ import {
 import type { ToastFn } from "@/components/console/ConsoleApp";
 import { useAuth } from "@/lib/auth";
 import { Icon } from "@/lib/kit-ui";
-import { describeFailure, useLoadSession } from "@/lib/load";
+import { useLoadSession } from "@/lib/load";
 import { AskView, AuditView, BriefsView, CompetitorsView, KeywordsView, UpdatePlanButton } from "./labs";
-import { gscFailure, gscSlot, notShownLine, plainNotes, readGsc, todoPage, topicOrigin, type NoteContext } from "./seo";
+import {
+  gscFailure, gscSlot, notShownLine, plainFailure, plainMessage, plainNotes, readGsc, todoPage, topicOrigin,
+  type NoteContext,
+} from "./seo";
 import { HiddenSuggestions, PageRow, PlanStrip, ReviewDropped } from "./rows";
 
 type SeoTool = "ask" | "keywords" | "briefs" | "audit";
@@ -293,7 +296,7 @@ function AddBrandForm({ onSaved, onToast }: { onSaved: () => void; onToast: Toas
       setName(""); setDomain(""); setSeeds("");
       onSaved();
     } catch (e) {
-      onToast(describeFailure(e, "Could not save brand"), "error");
+      onToast(plainFailure(e, "Could not save brand"), "error");
     } finally {
       setBusy(false);
     }
@@ -322,12 +325,16 @@ function AddBrandForm({ onSaved, onToast }: { onSaved: () => void; onToast: Toas
   );
 }
 
-export function SeoAgent({ onToast, onBack, focusBrand }: {
+export function SeoAgent({ onToast, onBack, focusBrand, onFocused }: {
   onToast: ToastFn;
   onBack: () => void;
   /** A brand to open on arrival — set by the workspace when Google sends the
-   *  reader back from Connect Search Console, so they land where they left. */
+   *  reader back from Connect Search Console, or when the dashboard sends
+   *  them here for one brand, so they land on it rather than the list. */
   focusBrand?: string;
+  /** Called once `focusBrand` is being opened, so the workspace can let go of
+   *  it and a later visit to the console starts at the brand list again. */
+  onFocused?: () => void;
 }) {
   const { user } = useAuth();
   const [overview, setOverview] = useState<SeoOverview | null>(null);
@@ -358,7 +365,7 @@ export function SeoAgent({ onToast, onBack, focusBrand }: {
       if (attempt.current()) setOverview(next);
     } catch (e) {
       const message = attempt.failure(e, "Couldn't load the SEO overview");
-      if (message) onToast(message, "error");
+      if (message) onToast(plainMessage(message, "Couldn't load the SEO overview"), "error");
     }
   }, [onToast, session]);
 
@@ -395,15 +402,16 @@ export function SeoAgent({ onToast, onBack, focusBrand }: {
         if (!attempt.current()) return;
         setPagesDoc(pagesRes.pages);
       } catch (e) {
-        const msg = attempt.failure(e, "Could not load pages");
-        if (!msg) return;
+        const failed = attempt.failure(e, "Could not load pages");
+        if (!failed) return;
+        const msg = plainMessage(failed, "Could not load pages");
         setPagesDoc(null);
         setPagesError(msg);
         onToast(msg, "error");
       }
     } catch (e) {
       const msg = attempt.failure(e, "Failed to load brand");
-      if (msg) onToast(msg, "error");
+      if (msg) onToast(plainMessage(msg, "Failed to load brand"), "error");
     } finally {
       if (attempt.current()) setOpening(null);
     }
@@ -419,7 +427,7 @@ export function SeoAgent({ onToast, onBack, focusBrand }: {
       onToast(`Pages refreshed — ${fmt(doc.pages.length)} page(s)`);
     } catch (e) {
       if (shownBrandId.current !== id) return;
-      const msg = describeFailure(e, "Could not refresh pages");
+      const msg = plainFailure(e, "Could not refresh pages");
       setPagesError(msg);
       onToast(msg, "error");
     } finally {
@@ -452,7 +460,7 @@ export function SeoAgent({ onToast, onBack, focusBrand }: {
         onToast("Done — see the brand card for data status");
       }
     } catch (e) {
-      onToast(describeFailure(e, "Analysis failed"), "error");
+      onToast(plainFailure(e, "Analysis failed"), "error");
     } finally {
       setBusy(false);
     }
@@ -472,7 +480,7 @@ export function SeoAgent({ onToast, onBack, focusBrand }: {
       setPlan(detail.plan ?? []);
       onToast(`Site review done — ${review.issues.length} finding(s) added to the fix list`);
     } catch (e) {
-      onToast(describeFailure(e, "Site analysis failed"), "error");
+      onToast(plainFailure(e, "Site analysis failed"), "error");
     } finally {
       setSiteBusy(false);
     }
@@ -481,7 +489,9 @@ export function SeoAgent({ onToast, onBack, focusBrand }: {
   // Opened on arrival from the Google return. Keyed on the id, so clearing it
   // (or the reader going back to the brand list) never re-opens anything.
   useEffect(() => {
-    if (focusBrand) void openBrand(focusBrand);
+    if (!focusBrand) return;
+    void openBrand(focusBrand);
+    onFocused?.();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [focusBrand]);
 
@@ -507,7 +517,7 @@ export function SeoAgent({ onToast, onBack, focusBrand }: {
       onToast("Search Console disconnected");
       await refreshOverview();
     } catch (e) {
-      onToast(describeFailure(e, "Disconnect failed"), "error");
+      onToast(plainFailure(e, "Disconnect failed"), "error");
     }
   }
 
@@ -519,7 +529,7 @@ export function SeoAgent({ onToast, onBack, focusBrand }: {
       setBrand(null); setRun(null);
       await refreshOverview();
     } catch (e) {
-      onToast(describeFailure(e, "Remove failed"), "error");
+      onToast(plainFailure(e, "Remove failed"), "error");
     }
   }
 
@@ -529,7 +539,7 @@ export function SeoAgent({ onToast, onBack, focusBrand }: {
     try {
       await seoSetTodoStatus(brand.id, todoId, status);
     } catch (e) {
-      onToast(describeFailure(e, "Could not save status"), "error");
+      onToast(plainFailure(e, "Could not save status"), "error");
     }
   }
 
@@ -813,7 +823,7 @@ export function SeoAgent({ onToast, onBack, focusBrand }: {
             </Fold>
 
             <Fold title="Competitors" hint="top 5 — and what they publish">
-              <CompetitorsView brandId={brand.id} isCreator={!!user?.is_creator} onToast={onToast} />
+              <CompetitorsView brandId={brand.id} isCreator={!!user?.is_creator} onToast={onToast} noteCtx={noteCtx} />
             </Fold>
 
             <Fold title="More tools" hint="ask · keyword lab · briefs · audit">
@@ -826,8 +836,8 @@ export function SeoAgent({ onToast, onBack, focusBrand }: {
                 ))}
               </div>
               {tool === "ask" && <AskView brandId={brand.id} brandName={brand.name} />}
-              {tool === "keywords" && <KeywordsView brandId={brand.id} onToast={onToast} />}
-              {tool === "briefs" && <BriefsView brandId={brand.id} onToast={onToast} />}
+              {tool === "keywords" && <KeywordsView brandId={brand.id} onToast={onToast} noteCtx={noteCtx} />}
+              {tool === "briefs" && <BriefsView brandId={brand.id} onToast={onToast} noteCtx={noteCtx} />}
               {tool === "audit" && <AuditView brandId={brand.id} brandName={brand.name} onToast={onToast} />}
             </Fold>
 

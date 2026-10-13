@@ -9,9 +9,11 @@
  *  surface grows.
  */
 
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { seoOverview, type SeoOverview } from "@/lib/api";
-import { canConnectGsc, NO_GSC_RETURN, readGscReturn, type GscReturnFlags } from "@/components/console/seo/seo";
+import {
+  canConnectGsc, GSC_UNFINISHED, NO_GSC_RETURN, plainMessage, readGscReturn, type GscReturnFlags,
+} from "@/components/console/seo/seo";
 import { loadPending, useLoadSession, type Load } from "@/lib/load";
 import { useHeadline, useHub, useWorkNav, type WorkSection } from "../context";
 import { initials } from "../model";
@@ -31,8 +33,15 @@ export function SeoWorkspace({ subject, section }: { subject: string; section: s
   const [beat, setBeat] = useState(0);
   /** What `/oauth/google` left on the hash after Connect Search Console. */
   const [ret, setRet] = useState<GscReturnFlags>(NO_GSC_RETURN);
-  /** The brand the console opens on arrival from that return. */
+  /** The brand the console opens on arrival — from that return, or from a
+   *  dashboard link. Held here because this component stays mounted across
+   *  sections; the console lets go of it once it has opened the brand. */
   const [focus, setFocus] = useState<string | undefined>(undefined);
+  const releaseFocus = useCallback(() => setFocus(undefined), []);
+  const openInConsole = useCallback((id: string) => {
+    setFocus(id);
+    openWork("seo", id, "console");
+  }, [openWork]);
 
   // Read the return once, then take it out of the address bar so a reload or
   // a bookmark does not replay the toast.
@@ -67,7 +76,9 @@ export function SeoWorkspace({ subject, section }: { subject: string; section: s
   // overview carries — so it waits for that read (or its failure).
   useEffect(() => {
     if (ret.error !== null) {
-      toast(ret.error, "error");
+      // The sentence rides in the address bar, so anyone can write one: it is
+      // shown only if it reads as a sentence, never as markup or a trace.
+      toast(plainMessage(ret.error, GSC_UNFINISHED), "error");
       setRet(NO_GSC_RETURN);
       return;
     }
@@ -91,13 +102,13 @@ export function SeoWorkspace({ subject, section }: { subject: string; section: s
   if (sec === "console") {
     return (
       <div className="legacy">
-        <SeoAgent onToast={toast} onBack={closeWork} focusBrand={focus} />
+        <SeoAgent onToast={toast} onBack={closeWork} focusBrand={focus} onFocused={releaseFocus} />
       </div>
     );
   }
 
   if (ov.phase === "failed" && !ov.data) {
-    return <Oops what="The brands could not be read." error={ov.error || ""} onRetry={() => setBeat((b) => b + 1)} />;
+    return <Oops what="The brands could not be read." error={plainMessage(ov.error, "")} onRetry={() => setBeat((b) => b + 1)} />;
   }
   // A reply that succeeded with no brands is an answer, not a wait: the
   // skeleton would otherwise stand for ever on an account with nothing set up.
@@ -110,5 +121,5 @@ export function SeoWorkspace({ subject, section }: { subject: string; section: s
   }
   if (!card) return <Wait what="Reading the brands" rows={3} />;
 
-  return <SeoDashboard card={card} connectReady={canConnectGsc(ov.data?.sources)} />;
+  return <SeoDashboard card={card} connectReady={canConnectGsc(ov.data?.sources)} onOpenConsole={openInConsole} />;
 }

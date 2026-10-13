@@ -140,7 +140,7 @@ export const GSC_STATE_PREFIX = "gsc.";
 export const GSC_CANCELLED = "Search Console wasn't connected — the Google sign-in was cancelled.";
 const GSC_GOOGLE_STOPPED = "Search Console wasn't connected — Google didn't finish the sign-in. Try again.";
 const GSC_NO_CODE = "Search Console wasn't connected — Google sent the browser back without a sign-in code. Try again.";
-const GSC_UNFINISHED = "Search Console wasn't connected — the connection couldn't be finished. Try again.";
+export const GSC_UNFINISHED = "Search Console wasn't connected — the connection couldn't be finished. Try again.";
 
 function base64UrlText(part: string): string | null {
   try {
@@ -290,14 +290,27 @@ function searchConsoleNote(c: NoteContext): string {
   return `Search Console couldn't be read for ${c.site}. ${GSC_CONNECT_UNAVAILABLE}`;
 }
 
+/** First match wins, so a specific prefix sits above the general one it
+ *  shares a start with. Every sentence has to be true wherever its prefix can
+ *  appear — the run, the keyword map, competitor profiles and briefs all write
+ *  `Serper…` and `LLM…` notes. */
 const RULES: readonly { prefix: string; say: (c: NoteContext) => string }[] = [
   { prefix: "Search Console", say: searchConsoleNote },
   { prefix: "Google Analytics", say: (c) => `Google Analytics isn't connected for ${c.site}. ${GA_SERVICE_ACCOUNT}` },
   { prefix: "Page analytics", say: () => "Page-level analytics couldn't be read on this run, so some page figures may be missing." },
   { prefix: "Rank tracking", say: () => "Live Google rank checks aren't available on this server right now, so positions weren't checked on this run." },
-  { prefix: "Serper", say: () => "Live Google checks aren't available on this server right now, so blog topics come from our own search data only." },
+  { prefix: "Serper key missing — topics", say: () => "Live Google checks aren't set up on this server, so blog topics come from our own search data only." },
+  { prefix: "Serper key missing — expansion", say: () => "Live Google checks aren't set up on this server, so keyword ideas come from AI and our own search data only." },
+  { prefix: "Serper key missing", say: () => "Live Google checks aren't set up on this server, so this part couldn't use live search results." },
+  { prefix: "Serper", say: () => "Live Google results weren't available for part of this — what's shown is what came back." },
   { prefix: "New-topic ideation", say: () => "AI topic ideas were skipped on this run. The rest of the blog plan is unaffected." },
+  { prefix: "LLM expansion skipped", say: () => "AI keyword ideas were skipped this time — the map is built from search data only." },
+  { prefix: "LLM returned no usable clusters", say: () => "The AI grouping didn't work this time, so keywords are grouped by shared words instead." },
+  { prefix: "LLM clustering skipped", say: () => "The AI grouping didn't work this time, so keywords are grouped by shared words instead." },
+  { prefix: "LLM outline skipped", say: () => "The AI outline was skipped this time, so the outline follows the structure of the top results." },
+  { prefix: "LLM", say: () => "An AI step was skipped this time — what's shown is what came back." },
   { prefix: "Sitemap watch", say: () => "The competitor sitemap check couldn't run this time." },
+  { prefix: "Page fetch", say: () => "Some competitor pages couldn't be read this time." },
 ];
 
 /** True for text that reads like a machine wrote it: markup or a repr
@@ -327,6 +340,22 @@ export function plainNotes(notes: readonly unknown[] | null | undefined, c: Note
   }
   return out;
 }
+
+/** An error sentence, safe to show. Many SEO routes answer a failure with
+ *  `detail=str(exc)`, which can be `Google Analytics rejected properties/123:
+ *  <HttpError 403 …>`; that becomes the caller's own fallback. A plain refusal
+ *  ("Run the site analysis first"), a timeout's sentence and a coded message
+ *  pass through unchanged. */
+export function plainMessage(message: string | null | undefined, fallback: string): string {
+  const m = (message ?? "").trim();
+  if (!m) return fallback;
+  return looksRaw(m) ? fallback : m;
+}
+
+/** `describeFailure`, then `plainMessage`: the one way the SEO screens turn a
+ *  rejection into words. */
+export const plainFailure = (e: unknown, fallback: string): string =>
+  plainMessage(describeFailure(e, fallback), fallback);
 
 /* ---------------------------------------------------- topic provenance -- */
 
@@ -373,6 +402,8 @@ const FLAG_LABELS: Record<string, string> = {
   "no-meta": "No meta description",
   "meta-long": "Meta description too long",
   "thin": "Thin content",
+  // the per-row "thin" / "Healthy — keep it fresh…" sentences becoming chips
+  "thin-content": "Thin content",
   "no-h1": "No H1",
   "images-no-alt": "Images missing alt text",
   "not-crawled": "Not in the site crawl",

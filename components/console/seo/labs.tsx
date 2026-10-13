@@ -11,17 +11,18 @@ import {
 } from "@/lib/api";
 import type { ToastFn } from "@/components/console/ConsoleApp";
 import { Icon } from "@/lib/kit-ui";
-import { describeFailure } from "@/lib/load";
 import { AuditIssueRow, BriefSchema } from "./rows";
-import { auditTone, briefSchema } from "./seo";
+import { auditTone, briefSchema, plainFailure, plainNotes, type NoteContext } from "./seo";
 
 /** Researcher-layer tabs for the SEO agent: Keywords, Competitors, Briefs, Audit. */
 
 const fmt = (n: number) => n.toLocaleString("en-US");
 /** Was a local re-implementation of the same two lines every other file had.
  *  The shared one adds the part none of them had: a timeout keeps
- *  `RequestTimeoutError`'s own message instead of the fallback. */
-const errMsg = describeFailure;
+ *  `RequestTimeoutError`'s own message instead of the fallback. On top of it,
+ *  `plainFailure` turns a reply that is raw exception text into the fallback,
+ *  because these routes answer failures with `detail=str(exc)`. */
+const errMsg = plainFailure;
 
 /** Every load in this file used to end in `.catch(() => {})`, so a failure was
  *  indistinguishable from "you have no data yet" — and the empty state then
@@ -47,19 +48,22 @@ function CoverageChip({ coverage }: { coverage: "gap" | "weak" | "ranking" }) {
   return <span className={`seo-chip seo-chip--cov-${coverage}`}>{text}</span>;
 }
 
-function Notes({ notes }: { notes: string[] }) {
-  if (!notes.length) return null;
+/** What a lab could not reach, as plain sentences — `Serper: <exc>` and its
+ *  kind never reach the reader (`seo.ts`, `plainNotes`). */
+function Notes({ notes, ctx }: { notes: readonly unknown[] | null | undefined; ctx: NoteContext }) {
+  const plain = plainNotes(notes, ctx);
+  if (!plain.length) return null;
   return (
     <div className="seo-degraded">
       <Icon name="alert-triangle" size={14} />
-      <div>{notes.map((n, i) => <div key={i}>{n}</div>)}</div>
+      <div>{plain.map((n) => <div key={n}>{n}</div>)}</div>
     </div>
   );
 }
 
 /* ------------------------------- Keywords -------------------------------- */
 
-export function KeywordsView({ brandId, onToast }: { brandId: string; onToast: ToastFn }) {
+export function KeywordsView({ brandId, onToast, noteCtx }: { brandId: string; onToast: ToastFn; noteCtx: NoteContext }) {
   const [lab, setLab] = useState<SeoKeywordLab | null>(null);
   const [labError, setLabError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -117,7 +121,7 @@ export function KeywordsView({ brandId, onToast }: { brandId: string; onToast: T
           <Icon name="refresh-cw" size={13} /> {lab ? "Re-map keywords" : "Map keywords"}
         </button>
       </div>
-      {lab && <Notes notes={lab.degraded} />}
+      {lab && <Notes notes={lab.degraded} ctx={noteCtx} />}
       {labError && (
         <LoadError what="the keyword map" error={labError} onRetry={() => setRetry((n) => n + 1)} />
       )}
@@ -237,8 +241,8 @@ export function AskView({ brandId, brandName }: { brandId: string; brandName: st
 
 /* ------------------------------ Competitors ------------------------------ */
 
-export function CompetitorsView({ brandId, isCreator, onToast }: {
-  brandId: string; isCreator: boolean; onToast: ToastFn;
+export function CompetitorsView({ brandId, isCreator, onToast, noteCtx }: {
+  brandId: string; isCreator: boolean; onToast: ToastFn; noteCtx: NoteContext;
 }) {
   const [data, setData] = useState<SeoCompetitors | null>(null);
   const [dataError, setDataError] = useState<string | null>(null);
@@ -294,7 +298,10 @@ export function CompetitorsView({ brandId, isCreator, onToast }: {
       const doc = await seoCompetitorProfilesRefresh(brandId);
       setProfiles(doc);
       setProfilesError(null);
-      onToast(doc.notes.length ? doc.notes[0] : "Competitor profiles refreshed");
+      // `notes` here is `Page fetch <url>: <exc>` and `Serper <domain>: <exc>`.
+      const notes = plainNotes(doc.notes, noteCtx);
+      if (notes.length) onToast(`Competitor profiles refreshed. ${notes.join(" ")}`, "warn");
+      else onToast("Competitor profiles refreshed");
     } catch (e) {
       onToast(errMsg(e, "Refresh failed"), "error");
     } finally {
@@ -308,7 +315,11 @@ export function CompetitorsView({ brandId, isCreator, onToast }: {
     try {
       const res = await seoTrackCompetitors(brandId);
       setData((d) => d && { ...d, shifts: res.shifts, feed: res.feed });
-      onToast(res.degraded.length ? res.degraded[0] : "Tracking updated");
+      // `degraded` here is `Sitemap watch: <exc>` and the like — plain words
+      // only, and a caveat reads as one rather than as a success.
+      const notes = plainNotes(res.degraded, noteCtx);
+      if (notes.length) onToast(`Tracking updated. ${notes.join(" ")}`, "warn");
+      else onToast("Tracking updated");
     } catch (e) {
       onToast(errMsg(e, "Tracking failed"), "error");
     } finally {
@@ -336,7 +347,7 @@ export function CompetitorsView({ brandId, isCreator, onToast }: {
             <Icon name="refresh-cw" size={13} /> Refresh
           </button>
         </div>
-        {profiles && <Notes notes={profiles.notes} />}
+        {profiles && <Notes notes={profiles.notes} ctx={noteCtx} />}
         {profilesError && (
           <LoadError what="the competitor profiles" error={profilesError}
             onRetry={() => setRetry((n) => n + 1)} />
@@ -520,7 +531,7 @@ function briefMarkdown(b: SeoBrief): string {
   ].filter(Boolean).join("\n");
 }
 
-export function BriefsView({ brandId, onToast }: { brandId: string; onToast: ToastFn }) {
+export function BriefsView({ brandId, onToast, noteCtx }: { brandId: string; onToast: ToastFn; noteCtx: NoteContext }) {
   const [briefs, setBriefs] = useState<SeoBrief[]>([]);
   const [briefsError, setBriefsError] = useState<string | null>(null);
   const [keyword, setKeyword] = useState("");
@@ -599,7 +610,7 @@ export function BriefsView({ brandId, onToast }: { brandId: string; onToast: Toa
             <span className="seo-cluster__nums">~{fmt(b.target_word_count)} words · {b.at}</span>
             <button className="seo-btn" onClick={(e) => { e.preventDefault(); void copy(b); }}>Copy</button>
           </summary>
-          <Notes notes={b.degraded} />
+          <Notes notes={b.degraded} ctx={noteCtx} />
           <ol className="seo-brief__outline">
             {b.outline.map((o, i) => (
               <li key={i}><strong>{o.heading}</strong><span>{o.note}</span></li>

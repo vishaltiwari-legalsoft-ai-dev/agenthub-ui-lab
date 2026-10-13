@@ -21,7 +21,7 @@
 import { useEffect, useState } from "react";
 import { seoBrandDetail, type SeoBrandCard, type SeoRun, type SeoTodo } from "@/lib/api";
 import { loadPending, useLoadSession, type Load } from "@/lib/load";
-import { GSC_CONNECT_UNAVAILABLE, gscNotice, plainNotes, readGsc } from "@/components/console/seo/seo";
+import { GSC_CONNECT_UNAVAILABLE, gscNotice, plainMessage, plainNotes, readGsc } from "@/components/console/seo/seo";
 import { useHub } from "../../context";
 import { n } from "../../model";
 import { Blank, Oops, Wait } from "../../ui";
@@ -206,13 +206,15 @@ function OppBars({ todos }: { todos: SeoTodo[] }) {
 
 /* -------------------------------------------------------------- the page -- */
 
-export function SeoDashboard({ card, connectReady }: {
+export function SeoDashboard({ card, connectReady, onOpenConsole }: {
   card: SeoBrandCard;
   /** `sources.gsc_connect`: whether the console's Connect button works on
    *  this server. Without it, the notice offers no way in that leads nowhere. */
   connectReady: boolean;
+  /** Opens the console on this brand rather than on the brand list. */
+  onOpenConsole: (brandId: string) => void;
 }) {
-  const { openWork, revision } = useHub();
+  const { revision } = useHub();
   const session = useLoadSession();
   const [detail, setDetail] = useState<Load<{ run: SeoRun | null }>>(loadPending);
   const [beat, setBeat] = useState(0);
@@ -231,7 +233,7 @@ export function SeoDashboard({ card, connectReady }: {
   const run = detail.data?.run ?? null;
 
   if (detail.phase === "failed" && !detail.data) {
-    return <Oops what="The brand's record could not be read." error={detail.error || ""} onRetry={() => setBeat((b) => b + 1)} />;
+    return <Oops what="The brand's record could not be read." error={plainMessage(detail.error, "")} onRetry={() => setBeat((b) => b + 1)} />;
   }
   if (detail.phase === "loading" && !detail.data) return <Wait what="Reading the record" rows={4} />;
 
@@ -272,7 +274,7 @@ export function SeoDashboard({ card, connectReady }: {
               <b>Search Console is not connected</b> — positions come from live rank tracking only;
               clicks and impressions are not measured for this brand.
               {connectReady ? (
-                <button type="button" className="sdb-link" onClick={() => openWork("seo", brandId, "console")}>
+                <button type="button" className="sdb-link" onClick={() => onOpenConsole(brandId)}>
                   Connect it in the console
                 </button>
               ) : (
@@ -284,7 +286,7 @@ export function SeoDashboard({ card, connectReady }: {
             <p>
               <b>Search Console is connected</b> — these figures don&apos;t include it yet. Refresh the
               data in the console to pull clicks and impressions.
-              <button type="button" className="sdb-link" onClick={() => openWork("seo", brandId, "console")}>
+              <button type="button" className="sdb-link" onClick={() => onOpenConsole(brandId)}>
                 Open the console
               </button>
             </p>
@@ -378,7 +380,7 @@ export function SeoDashboard({ card, connectReady }: {
         <section className="sdb-card sdb-card--queue">
           <header>
             <h3>Fix queue</h3>
-            <button type="button" className="sdb-link" onClick={() => openWork("seo", brandId, "console")}>
+            <button type="button" className="sdb-link" onClick={() => onOpenConsole(brandId)}>
               Work the list
             </button>
           </header>
