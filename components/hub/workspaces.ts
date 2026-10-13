@@ -75,13 +75,15 @@ export const WORKSPACES: WorkspaceDef[] = [
     ],
   },
   {
+    // The subject is a brand — its chips are the brand switcher. An open
+    // draft rides the Drafts section as `#/w/blog/<brandId>/<runId>`.
     slug: "blog",
     agentId: "a9",
-    subjectNoun: "draft",
-    subjectPlural: "drafts",
+    subjectNoun: "brand",
+    subjectPlural: "brands",
     sections: [
-      { id: "draft", label: "Draft", icon: "draft" },
-      { id: "research", label: "Research", icon: "research" },
+      { id: "drafts", label: "Drafts", icon: "reports" },
+      { id: "write", label: "Write", icon: "draft" },
     ],
   },
   {

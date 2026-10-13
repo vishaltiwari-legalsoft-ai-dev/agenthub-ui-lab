@@ -3076,6 +3076,10 @@ export interface BwRunSummary {
   topic: string;
   created: string;
   status: string;
+  /** Who started the run. Empty on the two pre-ownership legacy rows. */
+  user_id?: string;
+  /** The author's display name, on an admin's list only. */
+  by?: string;
 }
 
 export interface BwRun {
@@ -3085,6 +3089,8 @@ export interface BwRun {
   domain: string;
   topic: string;
   notes: string;
+  /** Who started the run. Empty on the two pre-ownership legacy runs. */
+  user_id?: string;
   created: string;
   status: "research" | "saturated" | "capped";
   rounds: BwRound[];
