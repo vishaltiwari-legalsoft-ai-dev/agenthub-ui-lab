@@ -4,7 +4,10 @@ import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { SeoAuditIssue, SeoPageIntel, SeoTopic } from "@/lib/api";
-import { ApiError, apiCode, RequestTimeoutError, seoOauthComplete, seoOauthStart } from "../../../lib/api";
+import {
+  API_URL, ApiError, apiCode, RequestTimeoutError, seoBrandDetail, seoOauthComplete, seoOauthDisconnect, seoOauthStart,
+  seoPages, seoPagesRefresh, seoSetTodoStatus,
+} from "../../../lib/api";
 import { describeFailure } from "../../../lib/load";
 import {
   auditEvidence, auditTone, briefSchema, canConnectGsc, connectedLine, finishGoogleReturn, flagChip,
@@ -687,5 +690,62 @@ describe("the dashboard opens the console on its brand", () => {
     expect(ws).toContain("focusBrand={focus} onFocused={releaseFocus}");
     expect(ws).toMatch(/setFocus\(id\);\s*openWork\("seo", id, "console"\);/);
     expect(agent).toMatch(/void openBrand\(focusBrand\);\s*onFocused\?\.\(\);/);
+  });
+});
+
+/* -------------------------------- brand ids in API paths (security) -- */
+/* The SEO workspace opens `#/w/seo/<brand>/console`, and that brand id —
+ * anyone can write it into a link — reaches `seoBrandDetail` and `seoPages`
+ * through `focusBrand`. Unencoded, `..%2F..%2Fx` decoded to `../../x` and the
+ * browser sent the signed-in reader's bearer to another backend path. */
+
+describe("brand ids never steer a request to another path", () => {
+  afterEach(() => vi.unstubAllGlobals());
+  const capture = () => {
+    const urls: string[] = [];
+    vi.stubGlobal("fetch", vi.fn(async (url: string) => {
+      urls.push(String(url));
+      return new Response("{}", { status: 200, headers: { "Content-Type": "application/json" } });
+    }));
+    return urls;
+  };
+
+  it("encodes ../x so it stays one segment under /api/seo-geo/", async () => {
+    const urls = capture();
+    await seoBrandDetail("../x");
+    await seoPages("../../admin");
+    await seoOauthStart("a/b?c#d");
+    await seoOauthDisconnect("..%2F..%2Fx");
+    await seoSetTodoStatus("../b", "../t", "done");
+    expect(urls).toEqual([
+      `${API_URL}/api/seo-geo/brands/..%2Fx`,
+      `${API_URL}/api/seo-geo/pages/..%2F..%2Fadmin`,
+      `${API_URL}/api/seo-geo/oauth/start/a%2Fb%3Fc%23d`,
+      `${API_URL}/api/seo-geo/oauth/disconnect/..%252F..%252Fx`,
+      `${API_URL}/api/seo-geo/todos/..%2Fb/..%2Ft`,
+    ]);
+    // what the browser would actually request, after resolving dot-segments
+    for (const u of urls) expect(new URL(u).pathname, u).toMatch(/^\/api\/seo-geo\/(brands|pages|oauth|todos)\//);
+  });
+
+  it("refuses a bare dot segment as a rejection, sending nothing", async () => {
+    const urls = capture();
+    await expect(seoBrandDetail("..")).rejects.toThrow("That brand isn't in the SEO list.");
+    await expect(seoPagesRefresh(".")).rejects.toThrow("That brand isn't in the SEO list.");
+    // a rejected promise, not a throw at the call site: `.then().catch()` chains catch it
+    const pending = seoPages("..");
+    expect(pending).toBeInstanceOf(Promise);
+    await pending.catch(() => undefined);
+    expect(urls).toEqual([]);
+    expect(plainFailure(await seoOauthStart("..").catch((e: unknown) => e), "x")).toBe("That brand isn't in the SEO list.");
+  });
+
+  it("covers every SEO path builder", () => {
+    const api = readFileSync(join(__dirname, "../../../lib/api.ts"), "utf8");
+    const templates = api.match(/`\/api\/seo-geo\/[^`]*`/g) ?? [];
+    expect(templates.length).toBeGreaterThan(20);
+    for (const t of templates) {
+      for (const hole of t.match(/\$\{[^}]*\}/g) ?? []) expect(hole, t).toMatch(/^\$\{pathSegment\(\w+\)\}$/);
+    }
   });
 });

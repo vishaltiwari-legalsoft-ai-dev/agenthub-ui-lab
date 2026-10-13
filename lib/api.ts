@@ -2671,6 +2671,18 @@ export const mrLeadsPdfUrl = (month?: string) =>
 
 /* ------------------------------ SEO agent (a2) ---------------------------- */
 
+/** One path segment from a value that may have come from the address bar —
+ *  the SEO workspace opens `#/w/seo/<brand>/…`, and that brand id reaches
+ *  these builders. `encodeURIComponent` keeps a `/` or `?` from adding
+ *  segments or a query. A bare `.` or `..` survives it, and the URL parser
+ *  resolves those as dot-segments even percent-encoded, so they are refused
+ *  outright. Every builder that uses this is `async`, so the refusal is a
+ *  rejected promise like any other failure, never a throw at the call site. */
+export function pathSegment(value: string): string {
+  if (value === "." || value === "..") throw new Error("That brand isn't in the SEO list.");
+  return encodeURIComponent(value);
+}
+
 export interface SeoBrand {
   id: string;
   name: string;
@@ -2851,20 +2863,20 @@ export interface SeoPlanItem {
   detail: string;
 }
 
-export const seoBrandDetail = (id: string, opts?: RequestOptions) =>
+export const seoBrandDetail = async (id: string, opts?: RequestOptions) =>
   getJson<{
     brand: SeoBrand;
     run: SeoRun | null;
     gsc?: SeoGscStatus;
     plan?: SeoPlanItem[];
     site_review?: SeoSiteReview | null;
-  }>(`/api/seo-geo/brands/${id}`, opts);
+  }>(`/api/seo-geo/brands/${pathSegment(id)}`, opts);
 
-export const seoAnalyzeSite = (brandId: string) =>
-  postJson<SeoSiteReview>(`/api/seo-geo/site-review/${brandId}`, {});
+export const seoAnalyzeSite = async (brandId: string) =>
+  postJson<SeoSiteReview>(`/api/seo-geo/site-review/${pathSegment(brandId)}`, {});
 
-export const seoOauthStart = (brandId: string) =>
-  getJson<{ url: string }>(`/api/seo-geo/oauth/start/${brandId}`);
+export const seoOauthStart = async (brandId: string) =>
+  getJson<{ url: string }>(`/api/seo-geo/oauth/start/${pathSegment(brandId)}`);
 
 /** Finish the Search Console connect with what Google sent back to
  *  `/oauth/google`. The bearer ties the grant to this member; the state names
@@ -2875,12 +2887,12 @@ export const seoOauthStart = (brandId: string) =>
 export const seoOauthComplete = (code: string, state: string) =>
   postJson<{ brand_id: string; gsc: SeoGscStatus }>("/api/seo-geo/oauth/complete", { code, state });
 
-export const seoOauthDisconnect = (brandId: string) =>
-  postJson<{ connected: boolean }>(`/api/seo-geo/oauth/disconnect/${brandId}`, {});
+export const seoOauthDisconnect = async (brandId: string) =>
+  postJson<{ connected: boolean }>(`/api/seo-geo/oauth/disconnect/${pathSegment(brandId)}`, {});
 
-export const seoRunBrand = (id: string) =>
+export const seoRunBrand = async (id: string) =>
   postJson<{ at: string; summary: SeoRunNums; degraded: string[]; todo_count: number; topic_count: number }>(
-    `/api/seo-geo/run/${id}`,
+    `/api/seo-geo/run/${pathSegment(id)}`,
     {},
   );
 
@@ -2888,11 +2900,11 @@ export const seoSaveBrand = (b: { id?: string; name: string; domain: string; gsc
   postJson<{ brands: SeoBrand[] }>("/api/seo-geo/brands", b);
 
 export async function seoDeleteBrand(id: string): Promise<{ brands: SeoBrand[] }> {
-  return deleteJson<{ brands: SeoBrand[] }>(`/api/seo-geo/brands/${id}`);
+  return deleteJson<{ brands: SeoBrand[] }>(`/api/seo-geo/brands/${pathSegment(id)}`);
 }
 
-export const seoSetTodoStatus = (brandId: string, todoId: string, status: SeoTodoStatus) =>
-  postJson<{ id: string; status: SeoTodoStatus }>(`/api/seo-geo/todos/${brandId}/${todoId}`, { status });
+export const seoSetTodoStatus = async (brandId: string, todoId: string, status: SeoTodoStatus) =>
+  postJson<{ id: string; status: SeoTodoStatus }>(`/api/seo-geo/todos/${pathSegment(brandId)}/${pathSegment(todoId)}`, { status });
 
 /* ------------------------ SEO agent: researcher layer --------------------- */
 
@@ -3021,22 +3033,22 @@ export interface SeoUpdatePlan {
   suggestions: string[];
 }
 
-export const seoKeywordLab = (brandId: string, opts?: RequestOptions) =>
-  getJson<{ lab: SeoKeywordLab | null }>(`/api/seo-geo/keywords/${brandId}`, opts);
+export const seoKeywordLab = async (brandId: string, opts?: RequestOptions) =>
+  getJson<{ lab: SeoKeywordLab | null }>(`/api/seo-geo/keywords/${pathSegment(brandId)}`, opts);
 
-export const seoRunKeywordLab = (brandId: string) =>
-  postJson<SeoKeywordLab>(`/api/seo-geo/keywords/${brandId}/run`, {});
+export const seoRunKeywordLab = async (brandId: string) =>
+  postJson<SeoKeywordLab>(`/api/seo-geo/keywords/${pathSegment(brandId)}/run`, {});
 
-export const seoCompetitors = (brandId: string, opts?: RequestOptions) =>
-  getJson<SeoCompetitors>(`/api/seo-geo/competitors/${brandId}`, opts);
+export const seoCompetitors = async (brandId: string, opts?: RequestOptions) =>
+  getJson<SeoCompetitors>(`/api/seo-geo/competitors/${pathSegment(brandId)}`, opts);
 
 export async function seoSetCompetitors(brandId: string, domains: string[]): Promise<{ tracked: string[] }> {
-  return putJson<{ tracked: string[] }>(`/api/seo-geo/competitors/${brandId}`, { domains });
+  return putJson<{ tracked: string[] }>(`/api/seo-geo/competitors/${pathSegment(brandId)}`, { domains });
 }
 
-export const seoTrackCompetitors = (brandId: string) =>
+export const seoTrackCompetitors = async (brandId: string) =>
   postJson<{ shifts: SeoRankShift[]; feed: Record<string, SeoSitemapEntry>; degraded: string[] }>(
-    `/api/seo-geo/competitors/${brandId}/track`,
+    `/api/seo-geo/competitors/${pathSegment(brandId)}/track`,
     {},
   );
 
@@ -3067,32 +3079,32 @@ export interface SeoCompetitorProfilesDoc {
   profiles: SeoCompetitorProfile[];
 }
 
-export const seoCompetitorProfiles = (brandId: string, opts?: RequestOptions) =>
-  getJson<{ profiles: SeoCompetitorProfilesDoc | null }>(`/api/seo-geo/competitors/${brandId}/profiles`, opts);
+export const seoCompetitorProfiles = async (brandId: string, opts?: RequestOptions) =>
+  getJson<{ profiles: SeoCompetitorProfilesDoc | null }>(`/api/seo-geo/competitors/${pathSegment(brandId)}/profiles`, opts);
 
-export const seoCompetitorProfilesRefresh = (brandId: string) =>
-  postJson<SeoCompetitorProfilesDoc>(`/api/seo-geo/competitors/${brandId}/profiles/refresh`, {});
+export const seoCompetitorProfilesRefresh = async (brandId: string) =>
+  postJson<SeoCompetitorProfilesDoc>(`/api/seo-geo/competitors/${pathSegment(brandId)}/profiles/refresh`, {});
 
-export const seoBriefs = (brandId: string, opts?: RequestOptions) =>
-  getJson<{ briefs: SeoBrief[] }>(`/api/seo-geo/briefs/${brandId}`, opts);
+export const seoBriefs = async (brandId: string, opts?: RequestOptions) =>
+  getJson<{ briefs: SeoBrief[] }>(`/api/seo-geo/briefs/${pathSegment(brandId)}`, opts);
 
-export const seoBuildBrief = (brandId: string, keyword: string) =>
-  postJson<SeoBrief>(`/api/seo-geo/briefs/${brandId}`, { keyword });
+export const seoBuildBrief = async (brandId: string, keyword: string) =>
+  postJson<SeoBrief>(`/api/seo-geo/briefs/${pathSegment(brandId)}`, { keyword });
 
-export const seoAuditReport = (brandId: string, opts?: RequestOptions) =>
-  getJson<{ report: SeoAuditReport | null }>(`/api/seo-geo/audit/${brandId}`, opts);
+export const seoAuditReport = async (brandId: string, opts?: RequestOptions) =>
+  getJson<{ report: SeoAuditReport | null }>(`/api/seo-geo/audit/${pathSegment(brandId)}`, opts);
 
-export const seoRunAudit = (brandId: string) =>
-  postJson<SeoAuditReport>(`/api/seo-geo/audit/${brandId}/run`, {});
+export const seoRunAudit = async (brandId: string) =>
+  postJson<SeoAuditReport>(`/api/seo-geo/audit/${pathSegment(brandId)}/run`, {});
 
-export const seoDraftScore = (brandId: string, text: string, keyword: string) =>
-  postJson<SeoDraftScore>(`/api/seo-geo/draft-score/${brandId}`, { text, keyword });
+export const seoDraftScore = async (brandId: string, text: string, keyword: string) =>
+  postJson<SeoDraftScore>(`/api/seo-geo/draft-score/${pathSegment(brandId)}`, { text, keyword });
 
-export const seoUpdatePlan = (brandId: string, page: string) =>
-  postJson<SeoUpdatePlan>(`/api/seo-geo/update-plan/${brandId}`, { page });
+export const seoUpdatePlan = async (brandId: string, page: string) =>
+  postJson<SeoUpdatePlan>(`/api/seo-geo/update-plan/${pathSegment(brandId)}`, { page });
 
-export const seoAsk = (brandId: string, question: string) =>
-  postJson<{ question: string; answer: string }>(`/api/seo-geo/ask/${brandId}`, { question });
+export const seoAsk = async (brandId: string, question: string) =>
+  postJson<{ question: string; answer: string }>(`/api/seo-geo/ask/${pathSegment(brandId)}`, { question });
 
 /* ---------------------------------------------------------------- blog writer (a9) */
 
@@ -3284,11 +3296,11 @@ export interface SeoPagesDoc {
   pages: SeoPageIntel[];
 }
 
-export const seoPages = (id: string, opts?: RequestOptions) =>
-  getJson<{ pages: SeoPagesDoc | null }>(`/api/seo-geo/pages/${id}`, opts);
+export const seoPages = async (id: string, opts?: RequestOptions) =>
+  getJson<{ pages: SeoPagesDoc | null }>(`/api/seo-geo/pages/${pathSegment(id)}`, opts);
 
-export const seoPagesRefresh = (id: string) =>
-  postJson<SeoPagesDoc>(`/api/seo-geo/pages/${id}/refresh`, {});
+export const seoPagesRefresh = async (id: string) =>
+  postJson<SeoPagesDoc>(`/api/seo-geo/pages/${pathSegment(id)}/refresh`, {});
 
 /* ---- GEO agent (a10): AI answer visibility ---- */
 
