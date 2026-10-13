@@ -5,7 +5,7 @@ import {
   seoAnalyzeSite, seoBrandDetail, seoDeleteBrand, seoOauthDisconnect, seoOauthStart,
   seoPages, seoPagesRefresh, seoRunBrand, seoSaveBrand, seoSetTodoStatus,
   type SeoBrand, type SeoGa, type SeoGscStatus, type SeoOverview, type SeoPagesDoc, type SeoPlanItem,
-  type SeoRun, type SeoSiteReview, type SeoTodoStatus, type SeoTopic,
+  type SeoRun, type SeoSiteReview, type SeoTodoStatus,
 } from "@/lib/api";
 import type { ToastFn } from "@/components/console/ConsoleApp";
 import { useAuth } from "@/lib/auth";
@@ -14,10 +14,10 @@ import { useLoadSession } from "@/lib/load";
 import { AskView, AuditView, BriefsView, CompetitorsView, KeywordsView, UpdatePlanButton } from "./labs";
 import { loadSeoOverview } from "./overview";
 import {
-  gscFailure, gscSlot, notShownLine, plainFailure, plainMessage, plainNotes, readGsc, todoPage, topicOrigin,
+  gscFailure, gscSlot, notShownLine, plainFailure, plainMessage, plainNotes, readGsc, todoCategoryLabel, todoPage,
   type NoteContext,
 } from "./seo";
-import { HiddenSuggestions, PageRow, PlanStrip, ReviewDropped } from "./rows";
+import { HiddenSuggestions, PageRow, PlanStrip, ReviewDropped, TodoPages, TopicRow, type SeeFix } from "./rows";
 
 type SeoTool = "ask" | "keywords" | "briefs" | "audit";
 
@@ -53,17 +53,6 @@ function Delta({ now, prev }: { now: number; prev: number }) {
   );
 }
 
-function TrendChip({ trend }: { trend: SeoTopic["trend"] }) {
-  const label = { rising: "Rising", falling: "Cooling", flat: "Steady", new: "New" }[trend];
-  return <span className={`seo-chip seo-chip--trend-${trend}`}>{label}</span>;
-}
-
-function DifficultyChip({ difficulty }: { difficulty: string | null }) {
-  if (!difficulty) return <span className="seo-chip">—</span>;
-  const cls = difficulty === "easy win" ? "easy" : difficulty === "medium" ? "medium" : "hard";
-  return <span className={`seo-chip seo-chip--diff-${cls}`}>{difficulty}</span>;
-}
-
 /** What this run could not reach, as plain sentences — never the exception
  *  text the backend recorded (`seo.ts`, `plainNotes`). */
 function DegradedNotes({ notes, ctx }: { notes: readonly unknown[]; ctx: NoteContext }) {
@@ -77,8 +66,10 @@ function DegradedNotes({ notes, ctx }: { notes: readonly unknown[]; ctx: NoteCon
   );
 }
 
-function PagesView({ doc, busy, error, onRefresh, noteCtx }: {
+function PagesView({ doc, busy, error, onRefresh, noteCtx, todos, onSeeFix }: {
   doc: SeoPagesDoc | null; busy: boolean; error: string | null; onRefresh: () => void; noteCtx: NoteContext;
+  /** The run's Fix list, for the links from advice that moved there. */
+  todos: SeoRun["todos"]; onSeeFix: SeeFix;
 }) {
   if (!doc) {
     return (
@@ -113,7 +104,7 @@ function PagesView({ doc, busy, error, onRefresh, noteCtx }: {
       </div>
       {/* the pages doc forwards the run's Search Console / Analytics failures */}
       <DegradedNotes notes={doc.notes} ctx={noteCtx} />
-      <HiddenSuggestions grounding={doc.grounding} />
+      <HiddenSuggestions grounding={doc.grounding} fixItems={doc.fix_items} todos={todos} onSeeFix={onSeeFix} />
       {doc.pages.length === 0 && (
         <div className="seo-empty">No pages found — run the site analysis, then refresh this tab.</div>
       )}
@@ -181,14 +172,19 @@ function Story({ run }: { run: SeoRun | null }) {
   );
 }
 
-/** A quiet, collapsed section: the headline carries the takeaway, the body carries the detail. */
-function Fold({ title, hint, count, defaultOpen = false, children }: {
-  title: string; hint?: string; count?: number; defaultOpen?: boolean; children: ReactNode;
+/** A quiet, collapsed section: the headline carries the takeaway, the body carries the detail.
+ *  `open` + `onToggle` make it controlled — the Fix list opens itself when a
+ *  "See Fix list #n" link points into it. */
+function Fold({ title, hint, count, defaultOpen = false, open: controlled, onToggle, children }: {
+  title: string; hint?: string; count?: number; defaultOpen?: boolean;
+  open?: boolean; onToggle?: (open: boolean) => void; children: ReactNode;
 }) {
-  const [open, setOpen] = useState(defaultOpen);
+  const [own, setOwn] = useState(defaultOpen);
+  const open = controlled ?? own;
+  const toggle = () => (onToggle ? onToggle(!open) : setOwn((v) => !v));
   return (
     <div className="seo-fold">
-      <button className="seo-fold__head" onClick={() => setOpen((v) => !v)} aria-expanded={open}>
+      <button className="seo-fold__head" onClick={toggle} aria-expanded={open}>
         <Icon name={open ? "chevron-down" : "chevron-right"} size={14} />
         <span className="seo-fold__title">{title}</span>
         {count != null && count > 0 && <span className="seo-fold__count">{fmt(count)}</span>}
@@ -359,6 +355,9 @@ export function SeoAgent({ onToast, onBack, focusBrand, onFocused, onBrandChange
   const [showAvoided, setShowAvoided] = useState(false);
   /** Set from the click until the browser leaves for Google. */
   const [connecting, setConnecting] = useState(false);
+  /** The Fix list's fold, and the item a "See Fix list #n" link points at. */
+  const [fixOpen, setFixOpen] = useState(false);
+  const [fixFocus, setFixFocus] = useState<string | null>(null);
 
   const session = useLoadSession();
 
@@ -388,6 +387,26 @@ export function SeoAgent({ onToast, onBack, focusBrand, onFocused, onBrandChange
    *  panel below B's name is A's data. This was one of only three modules that
    *  got that right by hand; the slot is the same discipline, minus the
    *  `RequestSequence` ref and the unmount cleanup it needed. */
+  /** Open the Fix list at one item: past the top ten if it must, scrolled
+   *  into view, focused for the keyboard, and briefly highlighted. */
+  const seeFix = useCallback<SeeFix>((todoId) => {
+    const at = run?.todos.findIndex((t) => t.id === todoId) ?? -1;
+    if (at < 0) return;
+    setFixOpen(true);
+    if (at >= 10) setShowAllTodos(true);
+    setFixFocus(todoId);
+  }, [run]);
+  useEffect(() => {
+    if (!fixFocus) return;
+    const frame = requestAnimationFrame(() => {
+      const el = document.getElementById(`seo-fix-${fixFocus}`);
+      el?.scrollIntoView({ behavior: "smooth", block: "center" });
+      el?.focus({ preventScroll: true });
+    });
+    const done = setTimeout(() => setFixFocus(null), 2400);
+    return () => { cancelAnimationFrame(frame); clearTimeout(done); };
+  }, [fixFocus]);
+
   /** Back to the brand list. */
   function closeBrand() {
     setBrand(null);
@@ -703,7 +722,7 @@ export function SeoAgent({ onToast, onBack, focusBrand, onFocused, onBrandChange
 
             <Story run={run} />
 
-            <PlanStrip plan={plan} />
+            <PlanStrip plan={plan} todos={run?.todos ?? []} onSeeFix={seeFix} />
 
             {run && <DegradedNotes notes={run.degraded} ctx={noteCtx} />}
 
@@ -835,6 +854,7 @@ export function SeoAgent({ onToast, onBack, focusBrand, onFocused, onBrandChange
 
             <Fold title="Pages" count={pagesDoc?.pages.length} hint="traffic + health, page by page">
               <PagesView doc={pagesDoc} busy={pagesBusy} error={pagesError} noteCtx={noteCtx}
+                todos={run?.todos ?? []} onSeeFix={seeFix}
                 onRefresh={() => void refreshPages(brand.id)} />
             </Fold>
 
@@ -859,7 +879,8 @@ export function SeoAgent({ onToast, onBack, focusBrand, onFocused, onBrandChange
 
             {run && (
               <>
-                <Fold title="Fix list" count={run.todos.length} hint="every fix, biggest win first">
+                <Fold title="Fix list" count={run.todos.length} hint="every fix, biggest win first"
+                      open={fixOpen} onToggle={setFixOpen}>
                 {(
                   <div className="mr-section">
                     <h3 className="mr-section__title">
@@ -869,7 +890,8 @@ export function SeoAgent({ onToast, onBack, focusBrand, onFocused, onBrandChange
                     </h3>
                     {run.todos.length === 0 && <div className="seo-empty">Nothing above the impact threshold — refresh after the next content push.</div>}
                     {(showAllTodos ? run.todos : run.todos.slice(0, 10)).map((t, i) => (
-                      <div key={t.id} className={`seo-todo${t.status === "done" ? " seo-todo--done" : ""}`}>
+                      <div key={t.id} id={`seo-fix-${t.id}`} tabIndex={-1}
+                           className={`seo-todo${t.status === "done" ? " seo-todo--done" : ""}${fixFocus === t.id ? " seo-todo--focus" : ""}`}>
                         <span className="seo-todo__rank">{i + 1}</span>
                         {t.est_monthly_clicks != null ? (
                           <div className="seo-todo__gain">+{fmt(t.est_monthly_clicks)}<small>est. clicks/mo</small></div>
@@ -883,7 +905,9 @@ export function SeoAgent({ onToast, onBack, focusBrand, onFocused, onBrandChange
                           <div className="seo-todo__action">{t.action}</div>
                           <div className="seo-todo__why">{t.why}</div>
                           <div className="seo-todo__meta">
-                            {t.kind === "site" && t.category && <span>{t.category}</span>}
+                            {t.kind === "site" && todoCategoryLabel(t.category) && (
+                              <span className="seo-chip seo-chip--src">{todoCategoryLabel(t.category)}</span>
+                            )}
                             {(() => {
                               // Site to-dos cite the page's URL; an older review
                               // stored its evidence sentence here instead.
@@ -898,6 +922,7 @@ export function SeoAgent({ onToast, onBack, focusBrand, onFocused, onBrandChange
                             {t.est_monthly_clicks != null && t.position > 0 && <span>pos {t.position}</span>}
                             {t.impressions != null && <span>{fmt(t.impressions)} impressions</span>}
                           </div>
+                          <TodoPages pages={t.pages} />
                           {t.kind === "decay" && (
                             <UpdatePlanButton brandId={brand.id} page={t.page} onToast={onToast} />
                           )}
@@ -933,35 +958,7 @@ export function SeoAgent({ onToast, onBack, focusBrand, onFocused, onBrandChange
                       {liveTopics.length === 0 && avoidedTopics.length === 0 && (
                         <div className="seo-empty">No topics yet — add seed keywords to this brand and refresh.</div>
                       )}
-                      {liveTopics.map((t, i) => {
-                        const origin = topicOrigin(t);
-                        return (
-                        <div key={t.keyword} className="seo-topic">
-                          <div className="seo-topic__main">
-                            <span className="seo-topic__kw"><span className="seo-topic__num">{i + 1}</span> {t.keyword}</span>
-                            <div className="seo-topic__chips">
-                              <span className={`seo-chip seo-chip--src seo-chip--src-${origin.key}`}>{origin.label}</span>
-                              {origin.fromSeed && <span className="seo-topic__from">from: {origin.fromSeed}</span>}
-                              <span className={`seo-chip seo-chip--tier-${t.priority === "high" ? "high" : t.priority === "medium" ? "medium" : "watch"}`}>
-                                {t.priority} priority
-                              </span>
-                              {t.angle && <span className="seo-chip">{t.angle}</span>}
-                              {t.intent && <span className="seo-chip">{t.intent}</span>}
-                              <TrendChip trend={t.trend} />
-                              <DifficultyChip difficulty={t.difficulty} />
-                            </div>
-                            <div className="seo-topic__why">{t.why}</div>
-                            <div className="seo-topic__impact">{t.impact}</div>
-                          </div>
-                          <div className="seo-topic__nums">
-                            <span className="seo-topic__vol">{t.volume_label}</span>
-                            {t.est_monthly_clicks != null && (
-                              <span className="seo-stat__num--good">≈ +{fmt(t.est_monthly_clicks)} clicks/mo</span>
-                            )}
-                          </div>
-                        </div>
-                        );
-                      })}
+                      {liveTopics.map((t, i) => <TopicRow key={t.keyword} t={t} index={i + 1} />)}
                       {avoidedTopics.length > 0 && (
                         <div className="seo-avoided">
                           <button className="seo-btn seo-avoided__toggle" onClick={() => setShowAvoided((v) => !v)}>

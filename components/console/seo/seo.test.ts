@@ -3,7 +3,7 @@ import { join } from "node:path";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { SeoAuditIssue, SeoBrandCard, SeoPageIntel, SeoTopic } from "@/lib/api";
+import type { SeoAuditIssue, SeoBrandCard, SeoPageIntel, SeoPlanItem, SeoTodo, SeoTopic } from "@/lib/api";
 import {
   API_URL, ApiError, apiCode, isAbortError, RequestTimeoutError, seoBrandDetail, seoOauthComplete, seoOauthDisconnect, seoOauthStart,
   seoPages, seoPagesRefresh, seoSetTodoStatus,
@@ -12,13 +12,15 @@ import { describeFailure } from "../../../lib/load";
 import {
   auditEvidence, auditTone, briefSchema, canConnectGsc, connectedLine, finishGoogleReturn, flagChip,
   consoleHeadline, GA_INTEGRATION, GA_SERVICE_ACCOUNT, GSC_CANCELLED, GSC_MISMATCH, pageChips, returnNeedsOverview,
-  subjectOpensInConsole, GSC_CONNECT_HINT, GSC_CONNECT_UNAVAILABLE, GSC_RETRY, GSC_UNFINISHED, gscFailure,
+  subjectOpensInConsole, planItemView, topicAngle, refreshHref, todoPages, todoCategoryLabel, movedFixLinks, GSC_CONNECT_HINT, GSC_CONNECT_UNAVAILABLE, GSC_RETRY, GSC_UNFINISHED, gscFailure,
   gscIntegration, gscReturnSentence,
   gscNotice, gscReturnPath, gscSlot, gscStateBrand, googleReturn, hiddenSuggestionsLine, looksRaw,
   NO_GSC_RETURN, notShownLine, pageRec, planHeading, plainFailure, plainMessage, plainNote, plainNotes, PLAIN_TOPIC_NOTES, readGsc,
   readGscReturn, reviewDropped, todoPage, topicOrigin, type GoogleReturnIO, type NoteContext,
 } from "./seo";
-import { AuditIssueRow, BriefSchema, HiddenSuggestions, PageRow, PlanStrip, ReviewDropped } from "./rows";
+import {
+  AuditIssueRow, BriefSchema, HiddenSuggestions, PageRow, PlanStrip, ReviewDropped, TodoPages, TopicRow,
+} from "./rows";
 import { loadSeoOverview, onSeoOverview } from "./overview";
 
 /* Every Search Console, degraded-note and topic-provenance sentence the SEO
@@ -601,7 +603,7 @@ describe("fix list: page links, the cut, and briefs' schema", () => {
     const labs = readFileSync(join(__dirname, "labs.tsx"), "utf8");
     expect(agent).not.toContain('"Rule: "');
     expect(agent).toContain("<PageRow key={p.path} p={p} />");
-    expect(agent).toContain("<PlanStrip plan={plan} />");
+    expect(agent).toContain("<PlanStrip plan={plan} todos={run?.todos ?? []} onSeeFix={seeFix} />");
     expect(agent).toContain("<ReviewDropped grounding={siteReview.grounding} />");
     expect(labs).toContain("<AuditIssueRow");
     expect(labs).toContain("<BriefSchema brief={b} />");
@@ -1121,5 +1123,270 @@ describe("D8 — Google Analytics on Integrations", () => {
     expect(src).toContain('const on = hooks.filter((h) => h.status === "on");');
     expect(src).toContain('const off = hooks.filter((h) => h.status === "off");');
     expect(src).toContain('info: { label: "Admin grants access", cls: "" }');
+  });
+});
+
+/* ------------------------------- round-2 backend contract (b17d136) -- */
+
+/** Every <button> in a rendered tree, function components expanded — so a
+ *  test can press one without a DOM. */
+type El = { type: unknown; props?: { children?: unknown; onClick?: () => void } };
+function buttonsIn(node: unknown): El[] {
+  if (Array.isArray(node)) return node.flatMap(buttonsIn);
+  if (!node || typeof node !== "object") return [];
+  const el = node as El;
+  if (typeof el.type === "function") return buttonsIn((el.type as (p: unknown) => unknown)(el.props));
+  return [...(el.type === "button" ? [el] : []), ...buttonsIn(el.props?.children)];
+}
+const textOf = (b: El): string => {
+  const c = b.props?.children;
+  return Array.isArray(c) ? c.join("") : String(c ?? "");
+};
+
+const todo = (id: string, over: Partial<SeoTodo> = {}): SeoTodo => ({
+  id, kind: "site", page: "", query: "", action: `Action ${id}`, why: `Why ${id}`,
+  est_monthly_clicks: null, position: 0, impressions: null, status: "todo", ...over,
+});
+const TODOS = [todo("t1"), todo("t2"), todo("t3"), todo("pa-links", { origin: "page-advice", category: "internal-links" })];
+
+describe("This week: one move, one place", () => {
+  const item = (over: Partial<SeoPlanItem>): SeoPlanItem => ({
+    source: "fix list", action: "Refresh the page targeting 'law firm intake services'",
+    detail: "It sits at position 14 with 2,300 impressions", ...over,
+  });
+
+  it("points at the Fix-list item and repeats none of its text", () => {
+    const p = item({ label: "Refresh: “law firm intake services”", ref_todo_id: "t2", ref_index: 2 });
+    expect(planItemView(p, TODOS)).toEqual({ kind: "fix", index: 2, todoId: "t2", label: "Refresh: “law firm intake services”" });
+    const out = html(createElement(PlanStrip, { plan: [p], todos: TODOS }));
+    expect(out).toContain("See Fix list #2");
+    expect(out).toContain("· Refresh: “law firm intake services”");
+    expect(out).not.toContain("Refresh the page targeting");
+    expect(out).not.toContain("It sits at position 14");
+  });
+
+  it("the link opens that item", () => {
+    const seen: string[] = [];
+    const p = item({ label: "Refresh it", ref_todo_id: "t3", ref_index: 3 });
+    const [link] = buttonsIn(PlanStrip({ plan: [p], todos: TODOS, onSeeFix: (id) => seen.push(id) }));
+    expect(textOf(link)).toBe("See Fix list #3");
+    link.props?.onClick?.();
+    expect(seen).toEqual(["t3"]);
+  });
+
+  it("finds the item by id first, then by position, and numbers it where it is now", () => {
+    expect(planItemView(item({ label: "x", ref_todo_id: "t3", ref_index: 1 }), TODOS)).toMatchObject({ kind: "fix", index: 3, todoId: "t3" });
+    expect(planItemView(item({ label: "x", ref_todo_id: "gone", ref_index: 2 }), TODOS)).toMatchObject({ kind: "fix", index: 2, todoId: "t2" });
+    // neither the id nor the position is on this list: a plain move
+    expect(planItemView(item({ label: "x", ref_todo_id: "gone", ref_index: 40 }), TODOS)).toEqual({ kind: "move", title: "x", detail: "It sits at position 14 with 2,300 impressions" });
+  });
+
+  it("shows a keyword or audit move as its label and detail", () => {
+    const p = item({ source: "keywords", action: "Go after “virtual paralegal services”", label: "Go after “virtual paralegal services”", ref_todo_id: null, ref_index: null });
+    const out = html(createElement(PlanStrip, { plan: [p], todos: TODOS }));
+    expect(out).not.toContain("See Fix list");
+    expect(out).toContain("Go after “virtual paralegal services”");
+    expect(out).toContain("It sits at position 14");
+  });
+
+  it("renders an older backend's plan (no label, no refs) as before", () => {
+    const p = { source: "fix list", action: "Old action text", detail: "Old detail" } as SeoPlanItem;
+    expect(planItemView(p, TODOS)).toEqual({ kind: "move", title: "Old action text", detail: "Old detail" });
+    const out = html(createElement(PlanStrip, { plan: [p] }));
+    expect(out).toContain("Old action text");
+    expect(out).toContain("Old detail");
+  });
+
+  it("the console opens the Fix list at the item", () => {
+    const agent = readFileSync(join(__dirname, "SeoAgent.tsx"), "utf8");
+    expect(agent).toContain("<PlanStrip plan={plan} todos={run?.todos ?? []} onSeeFix={seeFix} />");
+    expect(agent).toMatch(/open=\{fixOpen\} onToggle=\{setFixOpen\}/);
+    expect(agent).toContain("id={`seo-fix-${t.id}`} tabIndex={-1}");
+    expect(agent).toMatch(/if \(at >= 10\) setShowAllTodos\(true\);/);
+    expect(agent).toContain('el?.scrollIntoView({ behavior: "smooth", block: "center" });');
+  });
+});
+
+const topic = (over: Partial<SeoTopic> = {}): SeoTopic => ({
+  keyword: "virtual paralegal services", source: "seed", priority: "high", impact: "≈ 40 clicks/mo at position 5",
+  angle: "service page", volume_est: 900, volume_label: "~900/mo (our impressions)", trend: "rising",
+  difficulty: "medium", est_monthly_clicks: 40, why: "You listed this as a seed keyword", score: 0.8, ...over,
+});
+
+describe("topics: also on the Fix list, refresh instead, empty impact, angles", () => {
+  it("says 'also on your Fix list' once — in the why, with no second chip", () => {
+    const out = html(createElement(TopicRow, {
+      t: topic({ also_in_fix: 3, why: "You listed this as a seed keyword · Also on your Fix list as #3" }), index: 1,
+    }));
+    expect(out.split("Fix list").length - 1).toBe(1);
+  });
+
+  it("links the page to refresh instead, and only a web address", () => {
+    const out = html(createElement(TopicRow, { t: topic({ refresh_url: "https://legalsoft.com/virtual-paralegal" }), index: 1 }));
+    expect(out).toContain('href="https://legalsoft.com/virtual-paralegal"');
+    expect(out).toContain("Refresh this page instead");
+    expect(html(createElement(TopicRow, { t: topic({ refresh_url: "javascript:alert(1)" }), index: 1 }))).not.toContain("Refresh this page instead");
+    expect(refreshHref(null)).toBeNull();
+  });
+
+  it("draws no impact line for an empty impact", () => {
+    expect(html(createElement(TopicRow, { t: topic({ impact: "" }), index: 1 }))).not.toContain("seo-topic__impact");
+    expect(html(createElement(TopicRow, { t: topic(), index: 1 }))).toContain("≈ 40 clicks/mo at position 5");
+  });
+
+  it("names the new angles, and anything else as it came", () => {
+    expect(topicAngle("service page")).toBe("Service page");
+    expect(topicAngle("pricing explainer")).toBe("Pricing explainer");
+    expect(topicAngle("how-to guide")).toBe("How-to guide");
+    expect(topicAngle("pricing guide")).toBe("pricing guide");
+    expect(topicAngle("")).toBeNull();
+    expect(topicAngle(undefined)).toBeNull();
+  });
+
+  it("renders a topic from before the round-2 fields", () => {
+    const old = topic({ angle: "An honest cost table both sides would sign.", source: "new idea" });
+    delete (old as Partial<SeoTopic>).also_in_fix;
+    delete (old as Partial<SeoTopic>).refresh_url;
+    const out = html(createElement(TopicRow, { t: old, index: 2 }));
+    expect(out).toContain("AI idea");
+    expect(out).toContain("An honest cost table both sides would sign.");
+    expect(out).not.toContain("Refresh this page instead");
+    // and the console draws its topics through this row
+    expect(readFileSync(join(__dirname, "SeoAgent.tsx"), "utf8")).toContain("<TopicRow key={t.keyword} t={t} index={i + 1} />");
+  });
+});
+
+describe("Fix list: fixes that span pages, page-advice items", () => {
+  it("lists the pages behind 'On N pages'", () => {
+    expect(todoPages(["/pricing", "https://legalsoft.com/contact"])).toEqual({
+      label: "On 2 pages",
+      items: [{ text: "/pricing", href: null }, { text: "/contact", href: "https://legalsoft.com/contact" }],
+    });
+    const out = html(createElement(TodoPages, { pages: ["/a", "/b", "/c"] }));
+    expect(out).toContain("<details");
+    expect(out).toContain("<summary>On 3 pages</summary>");
+  });
+
+  it("draws nothing for an older to-do with no pages", () => {
+    expect(todoPages(undefined)).toBeNull();
+    expect(todoPages([])).toBeNull();
+    expect(html(createElement(TodoPages, { pages: undefined }))).toBe("");
+  });
+
+  it("names the categories, page-advice ones included", () => {
+    expect(todoCategoryLabel("internal-links")).toBe("Internal links");
+    expect(todoCategoryLabel("cta")).toBe("Call to action");
+    expect(todoCategoryLabel("trust")).toBe("Trust");
+    expect(todoCategoryLabel("site-speed")).toBe("Site speed");
+    expect(todoCategoryLabel(undefined)).toBeNull();
+    const agent = readFileSync(join(__dirname, "SeoAgent.tsx"), "utf8");
+    expect(agent).toContain("<TodoPages pages={t.pages} />");
+    expect(agent).toContain('<span className="seo-chip seo-chip--src">{todoCategoryLabel(t.category)}</span>');
+  });
+});
+
+describe("site review: contradicted and uncheckable drops", () => {
+  const drop = (reason: string) => ({ reason, insight: `Finding ${reason}`, detail: "" });
+
+  it("keeps the headline true for whatever was dropped", () => {
+    expect(reviewDropped({ dropped: [drop("contradicted-by-page"), drop("contradicted-by-page")] })?.line)
+      .toBe("2 findings dropped — your pages already have what they said was missing");
+    expect(reviewDropped({ dropped: [drop("unverifiable-absence")] })?.line)
+      .toBe("1 finding dropped — they couldn't be checked against your pages");
+    expect(reviewDropped({ dropped: [drop("contradicted-by-page"), drop("unverifiable-absence")] })?.line)
+      .toBe("2 findings dropped — your pages contradicted them or they couldn't be checked");
+    expect(reviewDropped({ dropped: [drop("no-evidence-url"), drop("contradicted-by-page")] })?.line)
+      .toBe("2 findings dropped — not supported by your pages");
+    expect(reviewDropped({ dropped: [drop("no-evidence-url"), drop("invented-number")] })?.line)
+      .toBe("2 findings dropped — no evidence on your pages");
+    expect(reviewDropped({ dropped: [drop("contradicted-by-page"), drop("duplicate")] })?.line)
+      .toBe("2 findings dropped by the evidence check");
+  });
+
+  it("says why each one went, in words", () => {
+    expect(reviewDropped({ dropped: [drop("contradicted-by-page"), drop("unverifiable-absence")] })?.items.map((i) => i.reason))
+      .toEqual(["your page already has it", "couldn't be checked against the page"]);
+  });
+});
+
+describe("pages: hidden versus moved to the Fix list", () => {
+  const g = (reasons: string[]) => ({ kept: 4, dropped: reasons.map((reason, i) => ({ path: `/p${i}`, reason, recommendation: "x", detail: "y" })) });
+
+  it("counts moved advice apart from hidden advice", () => {
+    expect(hiddenSuggestionsLine(g(["repeats-flags", "suggestion-too-long", "moved-to-fix-list", "moved-to-fix-list", "moved-to-fix-list"])))
+      .toBe("2 suggestions hidden (repeated the flags or didn't fit) · 3 moved to your Fix list");
+    expect(hiddenSuggestionsLine(g(["moved-to-fix-list"]))).toBe("1 suggestion moved to your Fix list");
+    expect(hiddenSuggestionsLine(g(["suggestion-too-long"]))).toBe("1 suggestion hidden because it repeated the flags or didn't fit the page.");
+  });
+
+  it("links each moved category to its Fix-list item", () => {
+    const fixItems = [
+      { category: "internal-links", paths: ["/a", "/b", "/c", "/d", "/e"], todo_id: null },
+      { category: "cta", paths: ["/x", "/y", "/z"], todo_id: "t1" },
+      { category: "cta", paths: [], todo_id: "t1" },
+    ];
+    expect(movedFixLinks(fixItems, TODOS)).toEqual([
+      { label: "Internal links on 5 pages", todoId: "pa-links" },
+      { label: "Call to action on 3 pages", todoId: "t1" },
+    ]);
+    // a page pass newer than the run: the item is not on this list, so no link
+    expect(movedFixLinks([{ category: "cta", paths: ["/x"], todo_id: "elsewhere" }], [])).toEqual([{ label: "Call to action on 1 page", todoId: null }]);
+    expect(movedFixLinks(undefined, TODOS)).toEqual([]);
+
+    const seen: string[] = [];
+    const node = HiddenSuggestions({ grounding: g(["moved-to-fix-list"]), fixItems, todos: TODOS, onSeeFix: (id) => seen.push(id) });
+    const links = buttonsIn(node);
+    expect(links.map(textOf)).toEqual(["Internal links on 5 pages", "Call to action on 3 pages"]);
+    links[0].props?.onClick?.();
+    expect(seen).toEqual(["pa-links"]);
+  });
+
+  it("renders an older pages doc (no fix_items, no moves) as before", () => {
+    expect(html(createElement(HiddenSuggestions, { grounding: g(["repeats-flags"]) })))
+      .toBe('<p class="seo-lab__meta">1 suggestion hidden because it repeated the flags or didn&#x27;t fit the page.</p>');
+  });
+});
+
+describe("audit: schema-fit reason once, pages as a list", () => {
+  const fit = (over: Partial<SeoAuditIssue>): SeoAuditIssue => ({
+    issue: "3 pages lack FAQPage schema", severity: "low", count: 3, fix: "Add FAQPage markup.",
+    pages: ["https://legalsoft.com/a", "https://legalsoft.com/b", "https://legalsoft.com/c"],
+    kind: "schema-fit", schema_type: "FAQPage", ...over,
+  });
+
+  it("states the finding's reason once and lists the pages", () => {
+    const issue = fit({
+      reason: "Visible question-and-answer pairs and no FAQPage markup.",
+      evidence: [
+        { page: "https://legalsoft.com/a", pairs: 4 },
+        { page: "https://legalsoft.com/b", pairs: 3 },
+        { page: "https://legalsoft.com/c", reason: "Q&A pairs in an accordion", pairs: 5 },
+      ],
+    });
+    expect(auditEvidence(issue)).toEqual({
+      label: "Why FAQPage fits",
+      note: "Visible question-and-answer pairs and no FAQPage markup.",
+      lines: [
+        "https://legalsoft.com/a (4 Q&A pairs)",
+        "https://legalsoft.com/b (3 Q&A pairs)",
+        "https://legalsoft.com/c (5 Q&A pairs) — Q&A pairs in an accordion",
+      ],
+      coversPages: true,
+    });
+    const out = html(createElement(AuditIssueRow, { issue }));
+    expect(out.split("Visible question-and-answer pairs and no FAQPage markup.").length - 1).toBe(1);
+  });
+
+  it("reads an older report with a reason on every page and none on the finding", () => {
+    const ev = auditEvidence(fit({ evidence: [{ page: "https://legalsoft.com/a", reason: "service page" }] }));
+    expect(ev?.note).toBeNull();
+    expect(ev?.lines).toEqual(["https://legalsoft.com/a — service page"]);
+  });
+});
+
+describe("coded 503s from the SEO routes", () => {
+  it("show their message, as written for the reader", () => {
+    const message = "The site review didn't finish — run it again in a minute.";
+    expect(plainFailure(new ApiError(message, 503, { detail: { code: "site_review_failed", message } }), "Site analysis failed")).toBe(message);
   });
 });

@@ -2749,8 +2749,14 @@ export interface SeoTodo {
   position: number;
   impressions: number | null;
   status: SeoTodoStatus;
-  /** Site-review to-dos: content / structure / trust / other. Absent on older runs. */
+  /** Site-review to-dos: content / structure / trust / other; page-advice
+   *  items: internal-links / cta. Absent on older runs. */
   category?: string;
+  /** Every page this fix applies to — absent ([]) on older runs. */
+  pages?: string[];
+  /** "page-advice": one Fix-list item standing for advice the page rows used
+   *  to repeat. Absent on everything else. */
+  origin?: string;
 }
 
 export interface SeoTopic {
@@ -2775,6 +2781,10 @@ export interface SeoTopic {
   /** For a Google suggestion, the seed it was suggested for — absent on runs
    *  that predate it. */
   from_seed?: string | null;
+  /** This keyword is also Fix-list item #n (1-based); the why-text says so. */
+  also_in_fix?: number | null;
+  /** A typed seed that overlaps an existing page: the page to refresh instead. */
+  refresh_url?: string | null;
 }
 
 export interface SeoGaTotals {
@@ -2862,8 +2872,15 @@ export interface SeoSiteReview {
 
 export interface SeoPlanItem {
   source: string;
+  /** Kept for older consoles; a newer one shows `label` / the Fix-list link. */
   action: string;
   detail: string;
+  /** At most eight words. Absent on older backends. */
+  label?: string;
+  /** The Fix-list item this move is — null for keyword and audit moves. */
+  ref_todo_id?: string | null;
+  /** Its 1-based position in `run.todos`. */
+  ref_index?: number | null;
 }
 
 export const seoBrandDetail = async (id: string, opts?: RequestOptions) =>
@@ -2998,9 +3015,12 @@ export interface SeoAuditIssue {
   /** decorative-alt: information, not a defect — unscored. */
   informational?: boolean;
   images?: number;
-  /** schema-fit: the type and why it fits each page. */
+  /** schema-fit: the type, the reason it fits (said once), and the pages —
+   *  each with its own `reason` only where it differs, and FAQ pages with the
+   *  Q&A `pairs` counted. Older reports put a reason on every page. */
   schema_type?: string;
-  evidence?: { page: string; reason: string }[];
+  reason?: string;
+  evidence?: { page: string; reason?: string; pairs?: number }[];
 }
 
 export interface SeoSiteCheck {
@@ -3284,6 +3304,8 @@ export interface SeoPageIntel {
    *  "thin-content", "meta-long", "not-crawled" — more may come. Not part of
    *  `flags`. Absent (null) on older docs. */
   rec_chip?: string | null;
+  /** What the AI line is about (title, meta, internal-links, cta, …). */
+  rec_category?: string | null;
   word_count: number;
 }
 
@@ -3300,6 +3322,9 @@ export interface SeoPagesDoc {
   notes: string[];
   /** Absent on docs built before the evidence check. */
   grounding?: SeoPagesGrounding;
+  /** Advice that moved off the rows to one Fix-list item per category.
+   *  `todo_id` null: the item is the run's page-advice to-do of that category. */
+  fix_items?: { category: string; paths: string[]; todo_id: string | null }[];
   pages: SeoPageIntel[];
 }
 

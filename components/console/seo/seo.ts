@@ -26,8 +26,8 @@
  */
 
 import type {
-  SeoAuditIssue, SeoBrandCard, SeoBrief, SeoGscStatus, SeoOverview, SeoPageIntel, SeoPagesGrounding, SeoReviewGrounding,
-  SeoTopic,
+  SeoAuditIssue, SeoBrandCard, SeoBrief, SeoGscStatus, SeoOverview, SeoPageIntel, SeoPagesDoc, SeoPagesGrounding,
+  SeoPlanItem, SeoReviewGrounding, SeoTodo, SeoTopic,
 } from "@/lib/api";
 // Values come in by relative path: the test suite runs without the `@/` alias,
 // which only erased type imports can use.
@@ -519,11 +519,71 @@ export function pageRec(p: Pick<SeoPageIntel, "recommendation" | "ai" | "rec_sou
 
 const plural = (n: number, one: string, many: string) => (n === 1 ? one : many);
 
-/** The quiet line under the pages list, or null when nothing was hidden. */
+const MOVED = "moved-to-fix-list";
+
+/** The quiet line under the pages list, or null when nothing was dropped.
+ *  Advice that moved to the Fix list was not hidden — it is counted apart:
+ *  "2 suggestions hidden (repeated the flags or didn't fit) · 5 moved to your
+ *  Fix list". */
 export function hiddenSuggestionsLine(g: SeoPagesGrounding | null | undefined): string | null {
-  const n = Array.isArray(g?.dropped) ? g.dropped.length : 0;
-  if (!n) return null;
-  return `${n} ${plural(n, "suggestion", "suggestions")} hidden because ${plural(n, "it", "they")} repeated the flags or didn't fit the page.`;
+  const dropped = Array.isArray(g?.dropped) ? g.dropped : [];
+  const moved = dropped.filter((d) => d && d.reason === MOVED).length;
+  const hidden = dropped.length - moved;
+  if (hidden && moved) {
+    return `${hidden} ${plural(hidden, "suggestion", "suggestions")} hidden (repeated the flags or didn't fit) · ${moved} moved to your Fix list`;
+  }
+  if (hidden) {
+    return `${hidden} ${plural(hidden, "suggestion", "suggestions")} hidden because ${plural(hidden, "it", "they")} repeated the flags or didn't fit the page.`;
+  }
+  if (moved) return `${moved} ${plural(moved, "suggestion", "suggestions")} moved to your Fix list`;
+  return null;
+}
+
+/** A Fix-list category in words. */
+const TODO_CATEGORIES: Record<string, string> = {
+  "internal-links": "Internal links",
+  "cta": "Call to action",
+  "content": "Content",
+  "structure": "Structure",
+  "trust": "Trust",
+  "other": "Other",
+};
+
+export function todoCategoryLabel(category: string | null | undefined): string | null {
+  const c = str(category);
+  if (!c) return null;
+  return TODO_CATEGORIES[c] ?? c.replace(/[-_]+/g, " ").replace(/^\w/, (x) => x.toUpperCase());
+}
+
+/** The Fix-list items the page rows' moved advice became, each with the
+ *  to-do it links to: its `todo_id`, or — for a new item — the run's
+ *  page-advice to-do of that category. `todoId` null: not on this run's list
+ *  (an older run, or a page pass newer than the run), so no link. */
+export function movedFixLinks(
+  fixItems: SeoPagesDoc["fix_items"] | null | undefined,
+  todos: readonly Pick<SeoTodo, "id" | "origin" | "category">[],
+): { label: string; todoId: string | null }[] {
+  return rows<{ category?: unknown; paths?: unknown; todo_id?: unknown }>(fixItems).flatMap((item) => {
+    const n = strs(item.paths).length;
+    const category = typeof item.category === "string" ? item.category : "";
+    if (!n || !category) return [];
+    const byId = typeof item.todo_id === "string" ? todos.find((t) => t.id === item.todo_id) : undefined;
+    const byCategory = todos.find((t) => t.origin === "page-advice" && t.category === category);
+    return [{
+      label: `${todoCategoryLabel(category)} on ${n} ${plural(n, "page", "pages")}`,
+      todoId: (byId ?? byCategory)?.id ?? null,
+    }];
+  });
+}
+
+/** "On 4 pages" and the list, for a fix that spans pages; null for none. */
+export function todoPages(pages: unknown): { label: string; items: { text: string; href: string | null }[] } | null {
+  const list = strs(pages);
+  if (!list.length) return null;
+  return {
+    label: `On ${list.length} ${plural(list.length, "page", "pages")}`,
+    items: list.map((p) => todoPage(p) ?? { text: p, href: null }),
+  };
 }
 
 /** The chip on an audit finding. Decorative alt text is information, never
@@ -533,6 +593,8 @@ export const auditTone = (i: Pick<SeoAuditIssue, "severity" | "informational" | 
 
 export interface AuditEvidence {
   label: string;
+  /** Said once, under the label — the reason every listed page shares. */
+  note?: string | null;
   lines: string[];
   /** The lines name every page themselves, so the bare page list is not
    *  printed under them a second time. */
@@ -582,12 +644,18 @@ export function auditEvidence(i: SeoAuditIssue): AuditEvidence | null {
       };
     }
     case "schema-fit": {
-      const ev = rows<{ page?: unknown; reason?: unknown }>(i.evidence).filter((e) => str(e.page));
+      // The finding's reason once; each page a bare URL unless its own reason
+      // differs, FAQ pages with their Q&A pairs. An older report put a reason
+      // on every page and none on the finding.
+      const ev = rows<{ page?: unknown; reason?: unknown; pairs?: unknown }>(i.evidence).filter((e) => str(e.page));
       if (!ev.length) return null;
       const type = str(i.schema_type);
+      const pairsOf = (e: { pairs?: unknown }) =>
+        typeof e.pairs === "number" && e.pairs > 0 ? ` (${e.pairs} Q&A ${plural(e.pairs, "pair", "pairs")})` : "";
       return {
         label: type ? `Why ${type} fits` : "Why it fits",
-        lines: ev.map((e) => (str(e.reason) ? `${e.page} — ${e.reason}` : String(e.page))),
+        note: str(i.reason),
+        lines: ev.map((e) => `${e.page}${pairsOf(e)}${str(e.reason) ? ` — ${e.reason}` : ""}`),
         coversPages: ev.length >= i.pages.length,
       };
     }
@@ -605,8 +673,28 @@ const REVIEW_DROP_REASONS: Record<string, string> = {
   "duplicate": "it repeated another finding",
   "malformed": "the answer came back incomplete",
   "over-limit": "over the limit for one review",
+  "contradicted-by-page": "your page already has it",
+  "unverifiable-absence": "couldn't be checked against the page",
 };
-const EVIDENCE_REASONS = new Set(["no-evidence-url", "invented-number", "schema-not-fit"]);
+/** Drops for want of support on the page — what the headline is about. */
+const NO_EVIDENCE = new Set(["no-evidence-url", "invented-number", "schema-not-fit"]);
+const CONTRADICTED = "contradicted-by-page";
+const UNCHECKABLE = "unverifiable-absence";
+const EVIDENCE_REASONS = new Set([...NO_EVIDENCE, CONTRADICTED, UNCHECKABLE]);
+
+/** The headline over the dropped findings — true of every drop it counts. */
+function droppedHeadline(n: number, reasons: readonly unknown[]): string {
+  const head = `${n} ${plural(n, "finding", "findings")} dropped`;
+  const all = (ok: (r: string) => boolean) => reasons.every((r) => typeof r === "string" && ok(r));
+  if (all((r) => NO_EVIDENCE.has(r))) return `${head} — no evidence on your pages`;
+  if (all((r) => r === CONTRADICTED)) return `${head} — your pages already have what they said was missing`;
+  if (all((r) => r === UNCHECKABLE)) return `${head} — they couldn't be checked against your pages`;
+  if (all((r) => r === CONTRADICTED || r === UNCHECKABLE)) {
+    return `${head} — your pages contradicted them or they couldn't be checked`;
+  }
+  if (all((r) => EVIDENCE_REASONS.has(r))) return `${head} — not supported by your pages`;
+  return `${head} by the evidence check`;
+}
 
 /** The review's quiet line and its disclosure, or null when nothing was
  *  dropped (or the review predates the check). The headline claims "no
@@ -617,12 +705,8 @@ export function reviewDropped(g: SeoReviewGrounding | null | undefined): {
 } | null {
   const dropped = rows<{ reason?: unknown; insight?: unknown }>(g?.dropped);
   if (!dropped.length) return null;
-  const n = dropped.length;
-  const allEvidence = dropped.every((d) => typeof d.reason === "string" && EVIDENCE_REASONS.has(d.reason));
   return {
-    line: allEvidence
-      ? `${n} ${plural(n, "finding", "findings")} dropped — no evidence on your pages`
-      : `${n} ${plural(n, "finding", "findings")} dropped by the evidence check`,
+    line: droppedHeadline(dropped.length, dropped.map((d) => d.reason)),
     items: dropped.map((d) => ({
       insight: str(d.insight) ?? "A finding",
       reason: (typeof d.reason === "string" && REVIEW_DROP_REASONS[d.reason]) || "it didn't pass the evidence check",
@@ -654,6 +738,49 @@ export function briefSchema(b: Pick<SeoBrief, "schema_recommended" | "schema_not
   const types = strs(b.schema_recommended);
   const note = str(b.schema_note);
   return { types, note: note ?? (types.length ? null : "No schema suggested for this page.") };
+}
+
+/** One "This week" move. A move that is a Fix-list item points there —
+ *  "See Fix list #n · label" — and repeats none of its text; the item is found
+ *  by id first, then by position, and its position on this list is the n. Any
+ *  other move is its label (an older backend: its action) and its detail. */
+export type PlanItemView =
+  | { kind: "fix"; index: number; todoId: string; label: string }
+  | { kind: "move"; title: string; detail: string };
+
+export function planItemView(p: SeoPlanItem, todos: readonly Pick<SeoTodo, "id">[]): PlanItemView {
+  const label = str(p.label);
+  const at = typeof p.ref_index === "number" && p.ref_index >= 1 ? Math.floor(p.ref_index) - 1 : -1;
+  if (at >= 0 || str(p.ref_todo_id)) {
+    const byId = str(p.ref_todo_id) ? todos.findIndex((t) => t.id === p.ref_todo_id) : -1;
+    const i = byId >= 0 ? byId : at >= 0 && at < todos.length ? at : -1;
+    if (i >= 0) return { kind: "fix", index: i + 1, todoId: todos[i].id, label: label ?? str(p.action) ?? "" };
+  }
+  return { kind: "move", title: label ?? str(p.action) ?? "", detail: str(p.detail) ?? "" };
+}
+
+/* --------------------------------------------------------- topic rows -- */
+
+const ANGLES: Record<string, string> = {
+  "service page": "Service page",
+  "pricing explainer": "Pricing explainer",
+  "comparison": "Comparison",
+  "how-to guide": "How-to guide",
+  "FAQ answer": "FAQ answer",
+};
+
+/** A topic's angle as its chip: the known ones in their own words, anything
+ *  else (an older run's wording) as it came, none for an empty one. */
+export function topicAngle(angle: unknown): string | null {
+  const a = str(angle);
+  if (!a) return null;
+  return ANGLES[a] ?? a;
+}
+
+/** The page a typed seed should refresh instead — only a web address. */
+export function refreshHref(url: unknown): string | null {
+  const u = str(url);
+  return u && /^https?:\/\//i.test(u) ? u : null;
 }
 
 /** The "This week" strip's heading — or null, and no strip, for an empty plan. */
