@@ -11,7 +11,8 @@ import {
 import { describeFailure } from "../../../lib/load";
 import {
   auditEvidence, auditTone, briefSchema, canConnectGsc, connectedLine, finishGoogleReturn, flagChip,
-  GA_SERVICE_ACCOUNT, GSC_CANCELLED, GSC_CONNECT_HINT, GSC_CONNECT_UNAVAILABLE, GSC_UNFINISHED, gscFailure, gscIntegration,
+  GA_SERVICE_ACCOUNT, GSC_CANCELLED, GSC_CONNECT_HINT, GSC_CONNECT_UNAVAILABLE, GSC_RETRY, GSC_UNFINISHED, gscFailure,
+  gscIntegration, gscReturnSentence,
   gscNotice, gscReturnPath, gscSlot, gscStateBrand, googleReturn, hiddenSuggestionsLine, looksRaw,
   NO_GSC_RETURN, notShownLine, pageRec, planHeading, plainFailure, plainMessage, plainNote, plainNotes, PLAIN_TOPIC_NOTES, readGsc,
   readGscReturn, reviewDropped, todoPage, topicOrigin, type GoogleReturnIO, type NoteContext,
@@ -112,16 +113,15 @@ describe("googleReturn — which specialist a redirect belongs to", () => {
     expect(googleReturn(`?${q}`)).toEqual({ kind: "gsc", code: "4/0Abc", state: STATE, brand: "berry-virtual" });
   });
 
-  it("turns a Google refusal into a plain sentence, never Google's code", () => {
+  it("reads a Google refusal as one of two reasons, never Google's own error value", () => {
     const q = new URLSearchParams({ error: "access_denied", state: STATE });
-    expect(googleReturn(`?${q}`)).toEqual({ kind: "gsc-refused", brand: "berry-virtual", message: GSC_CANCELLED });
-    const other = googleReturn(`?${new URLSearchParams({ error: "admin_policy_enforced", state: STATE })}`);
-    expect(other.kind).toBe("gsc-refused");
-    expect(other.kind === "gsc-refused" && other.message).not.toContain("admin_policy_enforced");
+    expect(googleReturn(`?${q}`)).toEqual({ kind: "gsc-refused", brand: "berry-virtual", reason: "cancelled" });
+    expect(googleReturn(`?${new URLSearchParams({ error: "admin_policy_enforced", state: STATE })}`))
+      .toEqual({ kind: "gsc-refused", brand: "berry-virtual", reason: "google_error" });
   });
 
   it("refuses a gsc return with no code", () => {
-    expect(googleReturn(`?state=${encodeURIComponent(STATE)}`).kind).toBe("gsc-refused");
+    expect(googleReturn(`?state=${encodeURIComponent(STATE)}`)).toEqual({ kind: "gsc-refused", brand: "berry-virtual", reason: "google_error" });
   });
 
   it("leaves everything else to the inbox path — success, error and bare", () => {
@@ -158,7 +158,7 @@ describe("finishGoogleReturn — what /oauth/google actually does", () => {
     await finishGoogleReturn(googleReturn(`?${new URLSearchParams({ error: "access_denied", state: STATE })}`), x);
     expect(x.completeGsc).not.toHaveBeenCalled();
     expect(x.inbox).not.toHaveBeenCalled();
-    expect(x.go).toHaveBeenCalledWith(gscReturnPath("berry-virtual", { error: GSC_CANCELLED }));
+    expect(x.go).toHaveBeenCalledWith("/#/w/seo/berry-virtual/console?gsc=cancelled");
   });
 
   it("hands a non-gsc return to the inbox path and nothing else", async () => {
@@ -171,11 +171,25 @@ describe("finishGoogleReturn — what /oauth/google actually does", () => {
     }
   });
 
-  it("carries a coded refusal's message back as-is", async () => {
+  it("carries a coded refusal back as its code alone — the message stays off the link", async () => {
     const message = "That Google account can't see Search Console for berry.com — sign in with one that can.";
-    const x = io(async () => { throw new ApiError("Request failed", 422, { detail: { code: "gsc_no_property", message } }); });
+    const x = io(async () => { throw new ApiError(message, 422, { detail: { code: "gsc_no_property", message } }); });
     await finishGoogleReturn(googleReturn(`?${new URLSearchParams({ code: "c", state: STATE })}`), x);
-    expect(x.go).toHaveBeenCalledWith(gscReturnPath("berry-virtual", { error: message }));
+    expect(x.go).toHaveBeenCalledWith("/#/w/seo/berry-virtual/console?gsc=gsc_no_property");
+  });
+
+  it("names an uncoded failure by its kind", async () => {
+    const run = async (err: unknown) => {
+      const x = io(async () => { throw err; });
+      await finishGoogleReturn(googleReturn(`?${new URLSearchParams({ code: "c", state: STATE })}`), x);
+      return String(x.go.mock.calls[0][0]).split("?")[1];
+    };
+    expect(await run(new ApiError("Unknown brand", 404, { detail: "Unknown brand" }))).toBe("gsc=unknown_brand");
+    expect(await run(new RequestTimeoutError(90_000))).toBe("gsc=timeout");
+    expect(await run(new ApiError("Request failed (500)", 500, null))).toBe("gsc=failed");
+    expect(await run(new TypeError("Failed to fetch"))).toBe("gsc=failed");
+    // a code that is not a code shape never rides the link
+    expect(await run(new ApiError("x", 422, { detail: { code: "gsc_<script>", message: "x" } }))).toBe("gsc=failed");
   });
 
   it("the page wires both paths through it, and the inbox exchange is unchanged", () => {
@@ -190,13 +204,18 @@ describe("finishGoogleReturn — what /oauth/google actually does", () => {
 });
 
 describe("gscReturnPath / readGscReturn round trip", () => {
-  it("reads success, failure and nothing", () => {
+  it("reads success, a code and nothing", () => {
     const ok = gscReturnPath("berry-virtual", { connected: true });
-    expect(readGscReturn(ok.slice(1))).toEqual({ connected: true, error: null });
-    const why = "Search Console connect isn't set up on this server yet — an admin needs to finish the Google setup.";
-    expect(readGscReturn(gscReturnPath(null, { error: why }).slice(1))).toEqual({ connected: false, error: why });
+    expect(readGscReturn(ok.slice(1))).toEqual({ connected: true, code: null });
+    expect(readGscReturn(gscReturnPath(null, { code: "gsc_state_expired" }).slice(1))).toEqual({ connected: false, code: "gsc_state_expired" });
     expect(readGscReturn("#/w/seo/berry-virtual/console")).toEqual(NO_GSC_RETURN);
+    expect(readGscReturn("#/w/seo?gsc=")).toEqual(NO_GSC_RETURN);
     expect(readGscReturn("#/w/inbox?connected=1")).toEqual(NO_GSC_RETURN);
+  });
+
+  it("puts only a code shape on the link", () => {
+    expect(gscReturnPath("b", { code: "Your account is locked" })).toBe("/#/w/seo/b/console?gsc=failed");
+    expect(gscReturnPath("b", { code: "cancelled" })).toBe("/#/w/seo/b/console?gsc=cancelled");
   });
 
   it("encodes the brand so an untrusted id cannot add path segments", () => {
@@ -656,10 +675,8 @@ describe("plainMessage / plainFailure — failures in words", () => {
     expect(plainMessage(null, "")).toBe("");
   });
 
-  it("will not toast markup someone put in the return link", () => {
+  it("keeps markup out of a plain message", () => {
     expect(plainMessage("<img src=x onerror=alert(1)>", GSC_UNFINISHED)).toBe(GSC_UNFINISHED);
-    const why = "Google didn't grant read access to Search Console — connect again and allow it.";
-    expect(plainMessage(readGscReturn(gscReturnPath("b", { error: why }).slice(1)).error, GSC_UNFINISHED)).toBe(why);
   });
 });
 
@@ -747,5 +764,82 @@ describe("brand ids never steer a request to another path", () => {
     for (const t of templates) {
       for (const hole of t.match(/\$\{[^}]*\}/g) ?? []) expect(hole, t).toMatch(/^\$\{pathSegment\(\w+\)\}$/);
     }
+  });
+});
+
+/* ------------------------------- the return toast says only fixed words -- */
+/* A link can be written by anyone. The return toast shows a sentence from
+ * this console's own table, chosen by a code — never text from the link —
+ * and names the site from the brand the console already has. */
+
+/** Every sentence the return toast can show, for the "only these" check. */
+const KNOWN_CODES = [
+  "cancelled", "google_error", "unknown_brand", "timeout", "failed",
+  "gsc_oauth_unconfigured", "gsc_offline", "gsc_state_invalid", "gsc_state_expired", "gsc_state_other_user",
+  "gsc_scope_not_granted", "gsc_no_property", "gsc_exchange_failed", "gsc_google_unavailable",
+];
+
+/** What the workspace toasts for a hash: read the code, say its sentence. */
+const toastFor = (hash: string, domain: string | null = "berry.com") => {
+  const r = readGscReturn(hash);
+  return r.code === null ? null : gscReturnSentence(r.code, domain);
+};
+
+describe("the Search Console return toast", () => {
+  it("never renders a sentence written into the link", () => {
+    const fixed = new Set([...KNOWN_CODES.map((c) => gscReturnSentence(c, "berry.com")), GSC_RETRY]);
+    const crafted = [
+      "Your account is locked — call +1 555 0100 to unlock it.",
+      "<img src=x onerror=alert(1)>",
+      "Search Console connected. Now paste your password below.",
+    ];
+    for (const text of crafted) {
+      for (const hash of [
+        `#/w/seo/b/console?gsc=${encodeURIComponent(text)}`,
+        `#/w/seo/b/console?gsc=failed&why=${encodeURIComponent(text)}`,
+        `#/w/seo/b/console?gsc=gsc_no_property&why=${encodeURIComponent(text)}&domain=${encodeURIComponent(text)}`,
+      ]) {
+        const said = toastFor(hash);
+        expect(said, hash).not.toBeNull();
+        expect(fixed.has(said as string), `${hash} → ${said}`).toBe(true);
+        expect(said).not.toContain("555");
+        expect(said).not.toContain("<img");
+        expect(said).not.toContain("password");
+      }
+    }
+  });
+
+  it("an unknown code is the generic line", () => {
+    expect(toastFor("#/w/seo/b/console?gsc=something_new")).toBe("Search Console wasn't connected — try again.");
+    expect(toastFor("#/w/seo/b/console?gsc=Your%20account%20is%20locked")).toBe(GSC_RETRY);
+    expect(gscReturnSentence(null, "berry.com")).toBe(GSC_RETRY);
+  });
+
+  it("maps every known code to its own fixed sentence", () => {
+    expect(toastFor("#/w/seo/b/console?gsc=cancelled")).toBe(GSC_CANCELLED);
+    expect(toastFor("#/w/seo/b/console?gsc=gsc_state_expired"))
+      .toBe("Search Console wasn't connected — the connect window expired. Start again from the SEO console.");
+    expect(toastFor("#/w/seo/b/console?gsc=gsc_oauth_unconfigured"))
+      .toBe("Search Console wasn't connected — connect isn't set up on this server yet. An admin needs to finish the Google setup.");
+    expect(toastFor("#/w/seo/b/console?gsc=google_error"))
+      .toBe("Search Console wasn't connected — Google didn't finish the sign-in. Try again.");
+    const sentences = KNOWN_CODES.map((c) => gscReturnSentence(c, "berry.com"));
+    for (const [i, s] of sentences.entries()) {
+      expect(s, KNOWN_CODES[i]).not.toBe(GSC_RETRY);
+      expect(s, KNOWN_CODES[i]).toMatch(/^Search Console wasn't connected — /);
+      expect(looksRaw(s), KNOWN_CODES[i]).toBe(false);
+    }
+  });
+
+  it("names the site for gsc_no_property from the brand the console knows, not the link", () => {
+    expect(toastFor("#/w/seo/b/console?gsc=gsc_no_property&domain=evil.example", "berry.com"))
+      .toBe("Search Console wasn't connected — this Google account has no Search Console access to berry.com. Sign in with an account that does, or ask the site owner to add it.");
+    expect(toastFor("#/w/seo/b/console?gsc=gsc_no_property", null)).toContain("access to this site.");
+  });
+
+  it("the workspace toasts the code's sentence with the overview's domain", () => {
+    const ws = readFileSync(join(__dirname, "../../hub/work/SeoWorkspace.tsx"), "utf8");
+    expect(ws).toContain("toast(gscReturnSentence(ret.code, known?.domain), \"error\")");
+    expect(ws).not.toMatch(/toast\(ret\.(error|code)\b/);
   });
 });

@@ -12,7 +12,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { seoOverview, type SeoOverview } from "@/lib/api";
 import {
-  canConnectGsc, GSC_UNFINISHED, NO_GSC_RETURN, plainMessage, readGscReturn, type GscReturnFlags,
+  canConnectGsc, gscReturnSentence, NO_GSC_RETURN, plainMessage, readGscReturn, type GscReturnFlags,
 } from "@/components/console/seo/seo";
 import { loadPending, useLoadSession, type Load } from "@/lib/load";
 import { useHeadline, useHub, useWorkNav, type WorkSection } from "../context";
@@ -48,7 +48,7 @@ export function SeoWorkspace({ subject, section }: { subject: string; section: s
   useEffect(() => {
     const hash = window.location.hash;
     const flags = readGscReturn(hash);
-    if (!flags.connected && flags.error === null) return;
+    if (!flags.connected && flags.code === null) return;
     setRet(flags);
     if (subject) setFocus(subject);
     window.history.replaceState(null, "", hash.slice(0, hash.indexOf("?")));
@@ -72,21 +72,19 @@ export function SeoWorkspace({ subject, section }: { subject: string; section: s
 
   useHeadline(card ? `${card.brand.name} · ${card.brand.domain}` : "reading the brands");
 
-  // The failure needs nothing; the success names the brand, which only the
-  // overview carries — so it waits for that read (or its failure).
+  // The link carries a code, never a sentence: the words come from
+  // `gscReturnSentence`, and the brand's name and domain from the overview —
+  // so both toasts wait for that read (or its failure).
   useEffect(() => {
-    if (ret.error !== null) {
-      // The sentence rides in the address bar, so anyone can write one: it is
-      // shown only if it reads as a sentence, never as markup or a trace.
-      toast(plainMessage(ret.error, GSC_UNFINISHED), "error");
-      setRet(NO_GSC_RETURN);
-      return;
+    if (!ret.connected && ret.code === null) return;
+    if (ov.phase === "loading") return;
+    const known = brands.find((b) => b.brand.id === subject)?.brand;
+    if (ret.code !== null) {
+      toast(gscReturnSentence(ret.code, known?.domain), "error");
+    } else {
+      toast(`Search Console connected${known ? ` for ${known.name}` : ""}. Press Refresh data to pull clicks and impressions.`, "ok");
     }
-    if (ret.connected && ov.phase !== "loading") {
-      const name = brands.find((b) => b.brand.id === subject)?.brand.name;
-      toast(`Search Console connected${name ? ` for ${name}` : ""}. Press Refresh data to pull clicks and impressions.`, "ok");
-      setRet(NO_GSC_RETURN);
-    }
+    setRet(NO_GSC_RETURN);
   }, [ret, ov.phase, brands, subject, toast]);
 
   useWorkNav({

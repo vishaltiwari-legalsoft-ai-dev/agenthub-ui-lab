@@ -138,8 +138,8 @@ export function gscNotice(
 
 export const GSC_STATE_PREFIX = "gsc.";
 export const GSC_CANCELLED = "Search Console wasn't connected — the Google sign-in was cancelled.";
-const GSC_GOOGLE_STOPPED = "Search Console wasn't connected — Google didn't finish the sign-in. Try again.";
-const GSC_NO_CODE = "Search Console wasn't connected — Google sent the browser back without a sign-in code. Try again.";
+/** For any return code this console does not know. */
+export const GSC_RETRY = "Search Console wasn't connected — try again.";
 export const GSC_UNFINISHED = "Search Console wasn't connected — the connection couldn't be finished. Try again.";
 
 function base64UrlText(part: string): string | null {
@@ -171,10 +171,14 @@ export function gscStateBrand(state: string | null | undefined): string | null {
   }
 }
 
+/** Why Google sent the reader back without a code: they pressed Cancel, or
+ *  something on Google's side (any other `error=`, or no code at all). */
+export type GoogleRefusal = "cancelled" | "google_error";
+
 export type GoogleReturn =
   | { kind: "inbox" }
   | { kind: "gsc"; code: string; state: string; brand: string | null }
-  | { kind: "gsc-refused"; brand: string | null; message: string };
+  | { kind: "gsc-refused"; brand: string | null; reason: GoogleRefusal };
 
 /** Which specialist a Google redirect belongs to, and what it carried. Inbox
  *  Triage states start with a hex user id, never `gsc.`, so anything without
@@ -185,44 +189,91 @@ export function googleReturn(search: string): GoogleReturn {
   if (!state.startsWith(GSC_STATE_PREFIX)) return { kind: "inbox" };
   const brand = gscStateBrand(state);
   const error = q.get("error");
-  if (error !== null) {
-    return { kind: "gsc-refused", brand, message: error === "access_denied" ? GSC_CANCELLED : GSC_GOOGLE_STOPPED };
-  }
+  if (error !== null) return { kind: "gsc-refused", brand, reason: error === "access_denied" ? "cancelled" : "google_error" };
   const code = q.get("code");
-  if (!code) return { kind: "gsc-refused", brand, message: GSC_NO_CODE };
+  if (!code) return { kind: "gsc-refused", brand, reason: "google_error" };
   return { kind: "gsc", code, state, brand };
 }
 
+/* The return link carries a code and nothing else. A sentence in the address
+ * bar is a sentence anyone can write — "Your account is locked, call …" — and
+ * the workspace would say it in the console's voice. So the link names what
+ * happened and the sentence comes from this table; a code the table does not
+ * know is the generic retry line. */
+
+/** A code as the link may carry it: lowercase letters and underscores. */
+const RETURN_CODE = /^[a-z_]{1,40}$/;
+
+/** Every code's fixed sentence. `gsc_no_property` names the site from the
+ *  brand the console already has, never from the link. Codes that cover more
+ *  than one backend situation get a sentence true of each. */
+const RETURN_SENTENCES: Record<string, (site: string) => string> = {
+  cancelled: () => GSC_CANCELLED,
+  google_error: () => "Search Console wasn't connected — Google didn't finish the sign-in. Try again.",
+  unknown_brand: () => "Search Console wasn't connected — that brand isn't in the SEO list any more.",
+  timeout: () => "Search Console wasn't connected — the server took too long to answer. Try again.",
+  failed: () => GSC_UNFINISHED,
+  gsc_oauth_unconfigured: () => "Search Console wasn't connected — connect isn't set up on this server yet. An admin needs to finish the Google setup.",
+  gsc_offline: () => "Search Console wasn't connected — it can't be reached from this server right now.",
+  gsc_state_invalid: () => "Search Console wasn't connected — the connect link wasn't valid. Start again from the SEO console.",
+  gsc_state_expired: () => "Search Console wasn't connected — the connect window expired. Start again from the SEO console.",
+  gsc_state_other_user: () => "Search Console wasn't connected — the connect link was started from a different account. Start again from the SEO console.",
+  gsc_scope_not_granted: () => "Search Console wasn't connected — Google didn't grant read access to Search Console. Connect again and allow it.",
+  gsc_no_property: (site) => `Search Console wasn't connected — this Google account has no Search Console access to ${site}. Sign in with an account that does, or ask the site owner to add it.`,
+  gsc_exchange_failed: () => "Search Console wasn't connected — Google didn't complete the permission. Press Connect again; if it keeps failing, remove AgentOS at myaccount.google.com/permissions first.",
+  gsc_google_unavailable: () => "Search Console wasn't connected — Google didn't answer properly. Press Connect again.",
+};
+
+/** The sentence for a return code. `site` is the brand's domain as the
+ *  console knows it (null while unknown). */
+export function gscReturnSentence(code: string | null | undefined, site: string | null | undefined): string {
+  const say = code ? RETURN_SENTENCES[code] : undefined;
+  return say ? say(str(site) ?? "this site") : GSC_RETRY;
+}
+
+/** The code for a refused complete: the backend's own `gsc_*` code, or what
+ *  kind of failure it was. Never its message — that stays off the link. */
+export function gscFailureCode(e: unknown): string {
+  const code = apiCode(e);
+  if (code && code.startsWith("gsc_") && RETURN_CODE.test(code)) return code;
+  if (apiStatus(e) === 404) return "unknown_brand";
+  if (isTimeoutError(e)) return "timeout";
+  return "failed";
+}
+
 /** Where the browser lands after the return: the brand's console, where the
- *  Connect button was, with one flag for the workspace to say out loud. */
-export function gscReturnPath(brand: string | null, outcome: { connected: true } | { error: string }): string {
+ *  Connect button was, with one code for the workspace to say out loud. */
+export function gscReturnPath(brand: string | null, outcome: { connected: true } | { code: string }): string {
   const route = brand ? `/#/w/seo/${encodeURIComponent(brand)}/console` : "/#/w/seo";
-  const flag = "error" in outcome ? `gsc=failed&why=${encodeURIComponent(outcome.error)}` : "gsc=connected";
-  return `${route}?${flag}`;
+  const code = "code" in outcome ? (RETURN_CODE.test(outcome.code) ? outcome.code : "failed") : "connected";
+  return `${route}?gsc=${code}`;
 }
 
 export interface GscReturnFlags {
   connected: boolean;
-  error: string | null;
+  /** What went wrong, as a code — null for success or no return at all. */
+  code: string | null;
 }
 
-export const NO_GSC_RETURN: GscReturnFlags = { connected: false, error: null };
+export const NO_GSC_RETURN: GscReturnFlags = { connected: false, code: null };
 
-/** The flag `gscReturnPath` left on the hash, read back by the workspace. */
+/** The code `gscReturnPath` left on the hash, read back by the workspace.
+ *  Anything else on the link is ignored; a value that is not a code shape
+ *  reads as an unknown code, so it gets the generic line. */
 export function readGscReturn(hash: string): GscReturnFlags {
   const i = hash.indexOf("?");
   if (i < 0) return NO_GSC_RETURN;
-  const q = new URLSearchParams(hash.slice(i + 1));
-  const flag = q.get("gsc");
-  if (flag === "connected") return { connected: true, error: null };
-  if (flag === "failed") return { connected: false, error: str(q.get("why")) ?? GSC_UNFINISHED };
-  return NO_GSC_RETURN;
+  const flag = new URLSearchParams(hash.slice(i + 1)).get("gsc");
+  if (flag === null || flag === "") return NO_GSC_RETURN;
+  if (flag === "connected") return { connected: true, code: null };
+  return { connected: false, code: RETURN_CODE.test(flag) ? flag : "unknown" };
 }
 
-/** The sentence for a refused Search Console call. A coded refusal's message
- *  is written for the reader and shown as-is; a timeout keeps its own words;
- *  anything else — a 500, a dropped connection — gets one calm sentence rather
- *  than "Request failed (500)". */
+/** The sentence for a refused Search Console call made from this page (the
+ *  Connect button's start). A coded refusal's message is written for the
+ *  reader and comes from an API reply, not a link, so it is shown as-is; a
+ *  timeout keeps its own words; anything else — a 500, a dropped connection —
+ *  gets one calm sentence rather than "Request failed (500)". */
 export function gscFailure(e: unknown, fallback: string = GSC_UNFINISHED): string {
   const code = apiCode(e);
   if (code && code.startsWith("gsc_")) {
@@ -251,14 +302,14 @@ export async function finishGoogleReturn(ret: GoogleReturn, io: GoogleReturnIO):
     return;
   }
   if (ret.kind === "gsc-refused") {
-    io.go(gscReturnPath(ret.brand, { error: ret.message }));
+    io.go(gscReturnPath(ret.brand, { code: ret.reason }));
     return;
   }
   try {
     const res = await io.completeGsc(ret.code, ret.state);
     io.go(gscReturnPath(str(res?.brand_id) ?? ret.brand, { connected: true }));
   } catch (e) {
-    io.go(gscReturnPath(ret.brand, { error: gscFailure(e) }));
+    io.go(gscReturnPath(ret.brand, { code: gscFailureCode(e) }));
   }
 }
 
