@@ -36,7 +36,7 @@ import { GraphicsStudioV2 } from "@/components/console/gd2/GraphicsStudioV2";
 /** The surfaces still rendering their pre-revamp markup with no workspace of
  *  their own. (SEO's classic console and the Blog Writer's desk still render
  *  inside `.legacy` too, but behind their workspaces, which own the route,
- *  the brand chips and the sections.) */
+ *  the brands in the work bar and the sections.) */
 export const LEGACY = ["w/art"] as const;
 
 function Legacy({ children }: { children: React.ReactNode }) {

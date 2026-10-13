@@ -10,8 +10,9 @@ import {
   trailingAverage, trendSeries, usersByRuns, weekOverWeek, weekSentence, windowNote, yTicks,
 } from "./teamUsage";
 import {
-  GEO_AGENT_ID, LIVE_AGENTS, PANELS,
-  agentsFor, canOpen, canOpenAgent, canOpenWorkspace, panelsFor, routeFromHash,
+  GEO_AGENT_ID, LIVE_AGENTS, PANELS, SUBJECT_CHIPS_MAX,
+  agentsFor, canOpen, canOpenAgent, canOpenWorkspace, filterSubjects, initials, panelsFor, routeFromHash,
+  usesSubjectPicker,
   type PanelId, type Viewer,
  } from "./model";
 
@@ -720,5 +721,63 @@ describe("whether the board offers the trend", () => {
     const tabs = boardTabs({ team: null, humans });
     expect(tabs.map((t): string => t.id)).not.toContain(TREND_ID);
     expect(pickTab(tabs, TREND_ID)?.id).toBe("m:2026-10");
+  });
+});
+
+/* The work bar's subjects: chips for a handful, a searchable picker past
+ * that. The search is the picker's whole usefulness with twelve brands, so it
+ * is pinned against the registry's real, oddly cased names. */
+
+describe("work-bar subject picker", () => {
+  const names = [
+    "legal soft", "AI Answering", "US Immigration AI", "MyMedical VA", "berry Virtual",
+    "Virtual Staffing", "Ai Virtual", "MedVirtual AI",
+  ];
+  const subjects = names.map((name) => ({ id: name.replace(/\s+/g, "-").toLowerCase(), ab: initials(name), name }));
+  const found = (q: string) => filterSubjects(subjects, q).map((s) => s.name);
+
+  it("folds into the picker only past a handful", () => {
+    expect(SUBJECT_CHIPS_MAX).toBe(5);
+    expect(usesSubjectPicker(2)).toBe(false);
+    expect(usesSubjectPicker(5)).toBe(false);
+    expect(usesSubjectPicker(6)).toBe(true);
+    expect(usesSubjectPicker(12)).toBe(true);
+  });
+
+  it("lists everything, in registry order, for an empty search", () => {
+    expect(found("")).toEqual(names);
+    expect(found("   ")).toEqual(names);
+  });
+
+  it("ignores case and spacing, so the registry's casing never hides a brand", () => {
+    expect(found("LEGAL SOFT")).toEqual(["legal soft"]);
+    expect(found("legalsoft")).toEqual(["legal soft"]);
+    expect(found("usimm")).toEqual(["US Immigration AI"]);
+  });
+
+  it("needs every word, in any order", () => {
+    expect(found("virtual berry")).toEqual(["berry Virtual"]);
+    expect(found("ai med")).toEqual(["MedVirtual AI"]);
+  });
+
+  it("puts names that start with the search first, registry order inside each group", () => {
+    expect(found("virtual")).toEqual(["Virtual Staffing", "berry Virtual", "Ai Virtual", "MedVirtual AI"]);
+    expect(found("ai")).toEqual(["AI Answering", "Ai Virtual", "US Immigration AI", "MedVirtual AI"]);
+  });
+
+  it("finds a brand by its initials", () => {
+    expect(found("mv")).toEqual(["MyMedical VA"]);
+    expect(found("ma")).toEqual(["MedVirtual AI"]);
+    expect(found("bv")).toEqual(["berry Virtual"]);
+  });
+
+  it("finds nothing rather than everything for a search that matches nothing", () => {
+    expect(found("zzz")).toEqual([]);
+  });
+
+  it("does not change the list it was given", () => {
+    const copy = [...subjects];
+    filterSubjects(subjects, "virtual");
+    expect(subjects).toEqual(copy);
   });
 });

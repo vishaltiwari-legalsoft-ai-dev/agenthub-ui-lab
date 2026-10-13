@@ -1234,7 +1234,12 @@
 
 /* ---------- the work bar (workspaces on the one shell) ---------- */
 
+/* Positioned and lifted: the glass below (every card has a backdrop filter,
+   so each is its own stacking context, later in the page) would otherwise
+   paint over the subject picker's open menu. Still under the sticky top nav,
+   which stacks a level up. */
 .wbar {
+  position: relative; z-index: 30;
   display: flex; align-items: center; flex-wrap: wrap; gap: 8px 14px;
   margin-bottom: 26px;
   padding: 10px 14px;
@@ -1258,7 +1263,8 @@
 .wbar__id b { font-size: 13.5px; font-weight: 600; letter-spacing: -0.01em; }
 .wbar__id em { font-style: normal; font-size: 11.5px; color: var(--fg-3); white-space: nowrap; }
 
-.wbar__subjects { display: inline-flex; align-items: center; gap: 5px; }
+.wbar__subjects { display: inline-flex; align-items: center; flex-wrap: wrap; gap: 5px; min-width: 0; }
+.wbar__subject span { white-space: nowrap; }
 .wbar__subject {
   display: inline-flex; align-items: center; gap: 6px;
   min-height: 28px; padding: 0 10px 0 5px;
@@ -1266,9 +1272,9 @@
   font-size: 12px; font-weight: 550; color: var(--fg-2);
   transition: background var(--t-fast) var(--ease), border-color var(--t-fast) var(--ease), color var(--t-fast) var(--ease);
 }
-.wbar__subject u {
+.wbar__subject u, .wbar__picker u, .wbar__opt u {
   text-decoration: none;
-  display: grid; place-items: center;
+  display: grid; place-items: center; flex: 0 0 auto;
   width: 20px; height: 20px;
   border-radius: 6px;
   background: var(--surface-2); border: 1px solid var(--rule);
@@ -1291,9 +1297,80 @@
 .wbar__sec.is-on { background: var(--fg); color: var(--bg); }
 .wbar__sec u { text-decoration: none; font-size: 10px; font-variant-numeric: tabular-nums; opacity: 0.7; }
 
+/* The subject picker: past five subjects, one button instead of a chip row.
+   Same badge as a chip (above), the top nav's menu surface and caret. */
+.wbar__pick { position: relative; min-width: 0; }
+.wbar__picker {
+  display: inline-flex; align-items: center; gap: 7px;
+  max-width: 300px; min-height: 30px; padding: 0 9px 0 11px;
+  border: 1px solid var(--rule); border-radius: var(--r-pill);
+  background: var(--surface);
+  font-size: 12.5px; font-weight: 550; color: var(--fg);
+  transition: border-color var(--t-fast) var(--ease), box-shadow var(--t-fast) var(--ease);
+}
+.wbar__picker:hover, .wbar__picker.is-open { border-color: var(--rule-hard); }
+.wbar__picker.is-open { box-shadow: 0 0 0 3px color-mix(in srgb, var(--fg) 6%, transparent); }
+.wbar__picker em { font-style: normal; font-weight: 500; color: var(--fg-3); }
+.wbar__picker > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; text-align: left; }
+.wbar__picker.is-open .tnav__caret svg { transform: rotate(-90deg); }
+
+/* Solid, unlike the nav's: inside the bar's own glass a second backdrop blur
+   can only see the bar, so the page under the menu would read through. */
+.wbar__menu {
+  top: calc(100% + 8px); left: 0;
+  background: var(--surface);
+  width: min(340px, calc(100vw - 32px)); min-width: 0;
+  padding: 6px; gap: 6px;
+}
+.wbar__find {
+  display: flex; align-items: center; gap: 8px;
+  min-height: 36px; padding: 0 10px;
+  border: 1px solid var(--rule); border-radius: 10px;
+  background: var(--surface);
+  transition: border-color var(--t-fast) var(--ease), box-shadow var(--t-fast) var(--ease);
+}
+.wbar__find:focus-within { border-color: var(--fg); box-shadow: 0 0 0 3px color-mix(in srgb, var(--fg) 10%, transparent); }
+.wbar__find svg { width: 15px; height: 15px; flex: 0 0 auto; color: var(--fg-3); }
+.wbar__find input { flex: 1; min-width: 0; border: 0; background: none; outline: none; font-size: 13px; color: var(--fg); }
+.wbar__find input::placeholder { color: var(--fg-3); }
+
+/* `minmax(0, 1fr)`: an auto track grows to the longest nowrap name and pushes
+   the counts out of the menu; this one holds the menu's width and ellipses. */
+.wbar__opts {
+  list-style: none; margin: 0; padding: 0;
+  max-height: min(340px, 52vh); overflow: hidden auto; overscroll-behavior: contain;
+  display: grid; grid-template-columns: minmax(0, 1fr); gap: 1px;
+}
+.wbar__opt {
+  display: flex; align-items: center; gap: 10px;
+  min-height: 36px; padding: 0 9px 0 7px;
+  border-radius: 10px;
+  font-size: 13px; font-weight: 500; color: var(--fg);
+  cursor: pointer;
+}
+.wbar__opt.is-active { background: color-mix(in srgb, var(--fg) 5%, transparent); }
+.wbar__opt > span { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.wbar__opt.is-on > span { font-weight: 600; }
+.wbar__opt.is-on u { background: var(--fg); border-color: var(--fg); color: var(--bg); }
+.wbar__opt em { font-style: normal; font-size: 11.5px; color: var(--fg-3); white-space: nowrap; font-variant-numeric: tabular-nums; }
+.wbar__tick { display: inline-flex; flex: 0 0 14px; justify-content: center; }
+.wbar__tick svg { width: 14px; height: 14px; color: var(--fg); }
+.wbar__none { margin: 0; padding: 8px 10px 10px; font-size: 12.5px; color: var(--fg-3); }
+
 @media (max-width: 900px) {
   .wbar__sections { margin-left: 0; }
   .wbar__id em { display: none; }
+}
+
+/* A phone: the picker takes what the row leaves it and its menu spans the
+   bar, so neither can push past the screen edge. 16px text stops iOS
+   zooming the page when the search box takes focus. */
+@media (max-width: 640px) {
+  .wbar__pick { position: static; flex: 1 1 150px; }
+  .wbar__picker { width: 100%; max-width: none; }
+  .wbar__picker > span { flex: 1; }
+  .wbar__menu { left: 8px; right: 8px; width: auto; }
+  .wbar__find input { font-size: 16px; }
 }
 
 /* ---------- the record as a base grid (Runs) ---------- */

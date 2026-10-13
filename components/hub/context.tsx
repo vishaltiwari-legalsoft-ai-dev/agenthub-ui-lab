@@ -31,6 +31,9 @@ export interface WorkSubject {
   name: string;
   /** Something is running on it right now. */
   busy?: boolean;
+  /** A muted figure beside the name in the subject picker ("3 drafts").
+   *  Absent until known — a blank says less than a guessed zero. */
+  note?: string;
 }
 
 /** One section of a workspace, as the rail needs it. `count` of `null` means
@@ -52,6 +55,9 @@ export interface WorkSection {
 export interface WorkNav {
   agentId: string;
   subjects: WorkSubject[];
+  /** What one subject is called in the picker's label and search — "Brand"
+   *  unless the workspace says otherwise. */
+  subjectNoun?: string;
   subject: string;
   sections: WorkSection[];
   section: string;
@@ -109,8 +115,8 @@ export function useHeadline(sub: string, title?: string): void {
 export function useWorkNav(nav: WorkNav | null): void {
   const { setWorkNav } = useHub();
   const key = nav
-    ? JSON.stringify([nav.agentId, nav.subject, nav.section,
-        nav.subjects.map((s) => [s.id, s.ab, s.name, !!s.busy]),
+    ? JSON.stringify([nav.agentId, nav.subject, nav.section, nav.subjectNoun ?? null,
+        nav.subjects.map((s) => [s.id, s.ab, s.name, !!s.busy, s.note ?? null]),
         nav.sections.map((s) => [s.id, s.label, s.icon, s.count ?? null])])
     : null;
   useEffect(() => {

@@ -1,7 +1,8 @@
 "use client";
 
-/** The Blog Writer workspace: brand chips in the work bar, Drafts and Write as
- *  its sections, the route as the only memory of where you were.
+/** The Blog Writer workspace: its brands in the work bar (a picker, past five,
+ *  with each brand's draft count), Drafts and Write as its sections, the route
+ *  as the only memory of where you were.
  *
  *  The desk underneath is still the pre-revamp screen, so it renders inside
  *  `.legacy` for the bridge's tokens. What changed is who decides what it
@@ -18,7 +19,7 @@ import { initials } from "../model";
 import { Blank, Oops, Wait } from "../ui";
 import { workspaceBySlug } from "../workspaces";
 import { BlogWriter } from "@/components/console/blogwriter/BlogWriter";
-import { draftsFor, readRoute, sectionOf } from "./blog";
+import { draftCountLabel, draftCounts, draftsFor, readRoute, sectionOf } from "./blog";
 
 const SECTIONS = workspaceBySlug("blog")!.sections;
 
@@ -47,12 +48,18 @@ export function BlogWorkspace({ subject, section }: { subject: string; section: 
   const drafts = draftsFor(rows, brandId, meId);
   const sec = sectionOf(view);
   const topic = view.kind === "run" ? known.find((r) => r.id === view.runId)?.topic : undefined;
+  // Per brand, over the same rows the Drafts count reads; absent until the
+  // runs are read, so the picker never shows a zero that means "not yet".
+  const counts = runs.data ? draftCounts(rows) : null;
 
   useHeadline(brand ? `${brand.name} · ${topic || brand.domain}` : "reading the brands");
 
   useWorkNav({
     agentId: "a9",
-    subjects: list.map((b) => ({ id: b.id, ab: initials(b.name), name: b.name })),
+    subjects: list.map((b) => ({
+      id: b.id, ab: initials(b.name), name: b.name,
+      note: counts ? draftCountLabel(counts.get(b.id) || 0) : undefined,
+    })),
     subject: brandId,
     sections: SECTIONS.map((s): WorkSection => ({ ...s, count: s.id === "drafts" ? (runs.data ? drafts.length : null) : null })),
     section: sec,

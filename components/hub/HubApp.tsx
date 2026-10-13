@@ -18,13 +18,12 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useAuth } from "@/lib/auth";
-import { Sprite, Ic } from "./Sprite";
-import { Mono } from "./ui";
+import { Sprite } from "./Sprite";
 import {
   HOME, PANELS,
   agentBySlug, agentsFor, canOpen, canOpenWorkspace, panelsFor,
   routeFromHash, routeToHash,
-  type HubAgent, type PanelId, type Route,
+  type PanelId, type Route,
 } from "./model";
 import TopNav from "./TopNav";
 import { HubProvider, type Headline, type HubContextValue, type ToastFn, type WorkNav } from "./context";
@@ -33,6 +32,7 @@ import { HubPalette } from "./Palette";
 import { BriefDialog } from "./BriefDialog";
 import { RequestDialog } from "./RequestDialog";
 import { PanelSwitch } from "./PanelSwitch";
+import { WorkBar } from "./WorkBar";
 import { useShellStats } from "./useShellStats";
 
 /* ------------------------------------------------------------------- theme -- */
@@ -54,72 +54,6 @@ function writeTheme(dark: boolean): void {
   } catch {
     /* storage off — the class on <html> is still correct for this session */
   }
-}
-
-/* -------------------------------------------------------------------- rail -- */
-
-/** The work bar: what the dark rail used to hold for a workspace, laid as
- *  one row under the header — the way back, the specialist's identity, its
- *  subjects when it has more than one, and its sections. Workspaces that
- *  have not registered a WorkNav (the legacy three) get back and identity
- *  and keep their own internal navigation. */
-function WorkBar({
-  agent, nav, backLabel, onBack,
-}: {
-  agent?: HubAgent;
-  nav: WorkNav | null;
-  backLabel: string;
-  onBack: () => void;
-}) {
-  if (!agent) return null;
-  return (
-    <div className="wbar">
-      <button type="button" className="wbar__back" onClick={onBack} title={`Back to ${backLabel}`}>
-        <Ic name="chevron" />
-        {backLabel}
-      </button>
-      <span className="wbar__id">
-        <Mono agent={agent} />
-        <b>{agent.name}</b>
-        <em>{agent.role}</em>
-      </span>
-      {nav && nav.subjects.length > 1 && (
-        <span className="wbar__subjects">
-          {nav.subjects.map((s) => (
-            <button
-              type="button"
-              key={s.id}
-              className={`wbar__subject${s.id === nav.subject ? " is-on" : ""}`}
-              title={s.name}
-              onClick={() => nav.onSubject(s.id)}
-            >
-              <u aria-hidden="true">{s.ab}</u>
-              <span>{s.name}</span>
-              {s.busy && (<><i className="wbar__go" aria-hidden="true" /><span className="sr">running now</span></>)}
-            </button>
-          ))}
-        </span>
-      )}
-      {nav && nav.sections.length > 0 && (
-        <nav className="wbar__sections" aria-label="Workspace sections">
-          {nav.sections.map((sec) => (
-            <button
-              type="button"
-              key={sec.id}
-              className={`wbar__sec${sec.id === nav.section ? " is-on" : ""}`}
-              aria-current={sec.id === nav.section ? "page" : undefined}
-              title={sec.label}
-              onClick={() => nav.onSection(sec.id)}
-            >
-              <Ic name={sec.icon} />
-              <span>{sec.label}</span>
-              {sec.count != null && sec.count > 0 && <u>{sec.count.toLocaleString("en-US")}</u>}
-            </button>
-          ))}
-        </nav>
-      )}
-    </div>
-  );
 }
 
 /* --------------------------------------------------------------------- app -- */

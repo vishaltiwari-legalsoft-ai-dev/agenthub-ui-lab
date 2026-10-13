@@ -1,8 +1,8 @@
 import { describe, expect, it } from "vitest";
 import type { BwBrand, BwRunSummary } from "@/lib/api";
 import {
-  TEAMMATE_RUNS_READ_ONLY, authorLabel, canEditRun, defaultBrand, draftsFor, isRunId,
-  parseView, readRoute, rowStatus, sectionOf, shouldAutoResume, viewSegment,
+  TEAMMATE_RUNS_READ_ONLY, authorLabel, canEditRun, defaultBrand, draftCountLabel, draftCounts, draftsFor,
+  isRunId, parseView, readRoute, rowStatus, sectionOf, shouldAutoResume, viewSegment,
 } from "./blog";
 
 /* The workspace's route is the truth, so these pin the reading of it: which
@@ -168,6 +168,34 @@ describe("draftsFor", () => {
 
   it("is empty for a brand with no drafts", () => {
     expect(draftsFor([run({ id: "bw-a" })], "globex", ME)).toEqual([]);
+  });
+});
+
+describe("the brand picker's draft counts", () => {
+  it("counts every draft per brand, the viewer's and teammates' alike", () => {
+    const rows = [
+      run({ id: "bw-1" }),
+      run({ id: "bw-2", user_id: MATE }),
+      run({ id: "bw-3", brand_id: "globex" }),
+    ];
+    const counts = draftCounts(rows);
+    expect(counts.get("acme")).toBe(2);
+    expect(counts.get("globex")).toBe(1);
+    expect(counts.get("initech")).toBeUndefined();
+  });
+
+  it("agrees with the Drafts section for every brand", () => {
+    const rows = [run({ id: "bw-1" }), run({ id: "bw-2", user_id: MATE }), run({ id: "bw-3", brand_id: "globex" })];
+    const counts = draftCounts(rows);
+    for (const b of BRANDS) expect(counts.get(b.id) || 0).toBe(draftsFor(rows, b.id, ME).length);
+  });
+
+  it("labels the count in words a reader skims", () => {
+    expect(draftCountLabel(0)).toBe("No drafts");
+    expect(draftCountLabel(1)).toBe("1 draft");
+    expect(draftCountLabel(3)).toBe("3 drafts");
+    expect(draftCountLabel(1204)).toBe("1,204 drafts");
+    expect(draftCountLabel(-1)).toBe("No drafts");
   });
 });
 

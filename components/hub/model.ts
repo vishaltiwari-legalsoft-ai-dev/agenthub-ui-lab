@@ -295,3 +295,32 @@ export function initials(name: string): string {
   if (parts.length === 1) return parts[0].slice(0, 2).toUpperCase();
   return (parts[0][0] + parts[1][0]).toUpperCase();
 }
+
+/* ------------------------------------------------------- work-bar subjects -- */
+
+/** Up to this many subjects sit in the work bar as chips; past it they fold
+ *  into one picker. Twelve brands as chips wrapped every label and pushed the
+ *  row out of its card; five short ones still read at a glance. */
+export const SUBJECT_CHIPS_MAX = 5;
+
+export const usesSubjectPicker = (count: number): boolean => count > SUBJECT_CHIPS_MAX;
+
+/** Letters and digits only, lower-cased: "US Immigration AI" and
+ *  "usimmigration" are the same search, and so are "legal soft" and
+ *  "LegalSoft" — the registry's casing and spacing are not the reader's. */
+const squash = (s: string): string => s.toLowerCase().replace(/[^\p{L}\p{N}]+/gu, "");
+
+/** The picker's search. Every word typed must appear in the name (or be the
+ *  initials); names that start with the search come first, and the registry's
+ *  order holds inside each group. An empty search is the whole list. */
+export function filterSubjects<T extends { name: string; ab?: string }>(items: readonly T[], query: string): T[] {
+  const words = query.split(/\s+/).map(squash).filter(Boolean);
+  if (!words.length) return [...items];
+  const whole = words.join("");
+  const hits = items.filter((it) => {
+    const name = squash(it.name);
+    return words.every((w) => name.includes(w)) || (!!it.ab && squash(it.ab) === whole);
+  });
+  const lead = hits.filter((it) => squash(it.name).startsWith(whole));
+  return [...lead, ...hits.filter((it) => !lead.includes(it))];
+}

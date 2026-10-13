@@ -55,7 +55,7 @@ export const isOwnRun = (run: { user_id?: string }, meId: string): boolean =>
 
 /** The brand a bare `#/w/blog` opens on: the brand of the viewer's newest
  *  run, else the first brand. A run on a brand no longer listed is skipped —
- *  landing on a chip that is not drawn would light nothing. */
+ *  landing on a brand the work bar does not list would mark nothing. */
 export function defaultBrand(brands: BwBrand[], runs: BwRunSummary[], meId: string): string {
   const listed = new Set(brands.map((b) => b.id));
   const mine = runs.filter((r) => isOwnRun(r, meId) && listed.has(r.brand_id)).sort(byNewest);
@@ -63,7 +63,7 @@ export function defaultBrand(brands: BwBrand[], runs: BwRunSummary[], meId: stri
 }
 
 /** Read the route's two segments into a brand and a view. An open run sits
- *  under its own brand whatever the link says, so the lit chip is never a
+ *  under its own brand whatever the link says, so the work bar never marks a
  *  brand the draft does not belong to. */
 export function readRoute(
   subject: string,
@@ -87,6 +87,20 @@ export function draftsFor(runs: BwRunSummary[], brandId: string, meId: string): 
   const mine = ofBrand.filter((r) => isOwnRun(r, meId)).sort(byNewest);
   const theirs = ofBrand.filter((r) => !isOwnRun(r, meId)).sort(byNewest);
   return [...mine, ...theirs];
+}
+
+/** How many drafts each brand has — the same rows `draftsFor` lists, so the
+ *  brand picker's figure and the Drafts section's count always agree. */
+export function draftCounts(runs: BwRunSummary[]): Map<string, number> {
+  const counts = new Map<string, number>();
+  for (const r of runs) counts.set(r.brand_id, (counts.get(r.brand_id) || 0) + 1);
+  return counts;
+}
+
+/** The brand picker's muted figure: "No drafts", "1 draft", "12 drafts". */
+export function draftCountLabel(count: number): string {
+  if (!count || count < 0) return "No drafts";
+  return `${count.toLocaleString("en-US")} draft${count === 1 ? "" : "s"}`;
 }
 
 /** Who a draft belongs to, in the row's words. `by` is the backend's name for
