@@ -1,7 +1,7 @@
 /** What the SEO agent's payloads mean on screen — pure, no React, no DOM.
  *
- *  Four readings live here because each one used to be decided inline and got
- *  something untrue onto the page:
+ *  These readings live here because each one used to be decided inline and
+ *  got something untrue onto the page:
  *
  *  - **Search Console.** The Connect button rendered on servers where the
  *    connect flow could not finish, and the help text told people to share
@@ -15,12 +15,19 @@
  *    sentence; anything that still looks like a stack or a status line is
  *    replaced, never quoted.
  *  - **Topic provenance.** Every blog topic now says where it came from.
+ *  - **Grounded advice.** Page rows whose chips are the whole message print no
+ *    advice line (never a bare "Rule: "), audit findings show what backs them,
+ *    decorative alt text is information rather than a severity, and whatever
+ *    the evidence checks threw away is counted in one quiet line. The rows
+ *    that draw these are in `rows.ts`.
  *
  *  Every new backend field is read with a default, because Vercel and Cloud
  *  Run deploy at different times and the older shape must still render.
  */
 
-import type { SeoGscStatus, SeoOverview, SeoTopic } from "@/lib/api";
+import type {
+  SeoAuditIssue, SeoBrief, SeoGscStatus, SeoOverview, SeoPageIntel, SeoPagesGrounding, SeoReviewGrounding, SeoTopic,
+} from "@/lib/api";
 // Values come in by relative path: the test suite runs without the `@/` alias,
 // which only erased type imports can use.
 import { apiBody, apiCode, apiStatus, isTimeoutError } from "../../../lib/api";
@@ -351,4 +358,185 @@ export function topicOrigin(t: Partial<Pick<SeoTopic, "source" | "from_seed">>):
     label: known?.label ?? "Other source",
     fromSeed: source === "google suggestion" ? str(t.from_seed) : null,
   };
+}
+
+/* ------------------------------------------- recommendations & the audit -- */
+/* The backend now grounds its advice in the crawl and says what it threw
+ * away. Every field below is additive: an older backend's payload has none of
+ * them, and each reads as the old behaviour. */
+
+/** A page row's flag id as a chip. Unknown ids — the backend is moving more
+ *  of its per-row sentences into chips — get a readable label, not the id. */
+const FLAG_LABELS: Record<string, string> = {
+  "no-title": "No title",
+  "title-long": "Title too long",
+  "no-meta": "No meta description",
+  "meta-long": "Meta description too long",
+  "thin": "Thin content",
+  "no-h1": "No H1",
+  "images-no-alt": "Images missing alt text",
+  "not-crawled": "Not in the site crawl",
+  "healthy": "Healthy",
+};
+
+export function flagChip(id: string): { label: string; ok: boolean } {
+  const label = FLAG_LABELS[id]
+    ?? (id.replace(/[-_]+/g, " ").trim().replace(/^\w/, (c) => c.toUpperCase()) || "Flag");
+  return { label, ok: id === "healthy" };
+}
+
+/** The page row's advice line: "AI: …" / "Rule: …", or none at all. A
+ *  `flags` row has no sentence on purpose — the chips are the message and the
+ *  fix lives in the audit — so it must not print a bare "Rule: ". */
+export function pageRec(p: Pick<SeoPageIntel, "recommendation" | "ai" | "rec_source">): { label: "AI" | "Rule"; text: string } | null {
+  if (p.rec_source === "flags") return null;
+  const text = str(p.recommendation);
+  if (!text) return null;
+  return { label: p.rec_source === "ai" || (p.rec_source === undefined && p.ai === true) ? "AI" : "Rule", text };
+}
+
+const plural = (n: number, one: string, many: string) => (n === 1 ? one : many);
+
+/** The quiet line under the pages list, or null when nothing was hidden. */
+export function hiddenSuggestionsLine(g: SeoPagesGrounding | null | undefined): string | null {
+  const n = Array.isArray(g?.dropped) ? g.dropped.length : 0;
+  if (!n) return null;
+  return `${n} ${plural(n, "suggestion", "suggestions")} hidden because ${plural(n, "it", "they")} repeated the flags or didn't fit the page.`;
+}
+
+/** The chip on an audit finding. Decorative alt text is information, never
+ *  a severity — "info", not "low", and never "missing". */
+export const auditTone = (i: Pick<SeoAuditIssue, "severity" | "informational" | "kind">): "info" | SeoAuditIssue["severity"] =>
+  i.informational === true || i.kind === "decorative-alt" ? "info" : i.severity;
+
+export interface AuditEvidence {
+  label: string;
+  lines: string[];
+  /** The lines name every page themselves, so the bare page list is not
+   *  printed under them a second time. */
+  coversPages: boolean;
+}
+
+const strs = (v: unknown): string[] =>
+  Array.isArray(v) ? v.filter((x): x is string => typeof x === "string" && !!x.trim()) : [];
+const rows = <T,>(v: unknown): T[] => (Array.isArray(v) ? v.filter((x) => x && typeof x === "object") as T[] : []);
+
+/** What backs an audit finding, for its expandable detail. Null for an older
+ *  report (no `kind`) and for kinds that carry nothing beyond their pages. */
+export function auditEvidence(i: SeoAuditIssue): AuditEvidence | null {
+  switch (i.kind) {
+    case "title-template": {
+      const suffix = str(i.suffix);
+      if (!suffix) return null;
+      const n = typeof i.suffix_chars === "number" ? i.suffix_chars : suffix.length;
+      return { label: "Shared title ending", lines: [`“${suffix}” adds ${n} ${plural(n, "character", "characters")} to every long title`], coversPages: false };
+    }
+    case "template-alt": {
+      const srcs = strs(i.srcs);
+      return srcs.length ? { label: "Images in the shared header/footer", lines: srcs, coversPages: false } : null;
+    }
+    case "page-alt": {
+      const ex = rows<{ page?: unknown; srcs?: unknown }>(i.examples).filter((e) => str(e.page));
+      if (!ex.length) return null;
+      return {
+        label: "Images without alt text, by page",
+        lines: ex.map((e) => { const s = strs(e.srcs); return s.length ? `${e.page} — ${s.join(", ")}` : String(e.page); }),
+        coversPages: ex.length >= i.pages.length,
+      };
+    }
+    case "decorative-alt": {
+      const n = typeof i.images === "number" ? i.images : 0;
+      return n > 0
+        ? { label: "Marked decorative", lines: [`${n} ${plural(n, "image", "images")} with alt="" — not missing, just skipped by screen readers`], coversPages: false }
+        : null;
+    }
+    case "schema-error": {
+      const ex = rows<{ page?: unknown; error?: unknown }>(i.examples).filter((e) => str(e.page));
+      if (!ex.length) return null;
+      return {
+        label: "What didn't parse",
+        lines: ex.map((e) => (str(e.error) ? `${e.page} — ${e.error}` : String(e.page))),
+        coversPages: ex.length >= i.pages.length,
+      };
+    }
+    case "schema-fit": {
+      const ev = rows<{ page?: unknown; reason?: unknown }>(i.evidence).filter((e) => str(e.page));
+      if (!ev.length) return null;
+      const type = str(i.schema_type);
+      return {
+        label: type ? `Why ${type} fits` : "Why it fits",
+        lines: ev.map((e) => (str(e.reason) ? `${e.page} — ${e.reason}` : String(e.page))),
+        coversPages: ev.length >= i.pages.length,
+      };
+    }
+    default:
+      return null;
+  }
+}
+
+/** Why the expert review dropped a finding, in plain words. */
+const REVIEW_DROP_REASONS: Record<string, string> = {
+  "audit-owned": "already covered by the technical audit",
+  "no-evidence-url": "no page on your site backs it up",
+  "invented-number": "it cited a number that isn't on the page",
+  "schema-not-fit": "schema advice that doesn't fit the page",
+  "duplicate": "it repeated another finding",
+  "malformed": "the answer came back incomplete",
+  "over-limit": "over the limit for one review",
+};
+const EVIDENCE_REASONS = new Set(["no-evidence-url", "invented-number", "schema-not-fit"]);
+
+/** The review's quiet line and its disclosure, or null when nothing was
+ *  dropped (or the review predates the check). The headline claims "no
+ *  evidence" only when that is what every drop was. */
+export function reviewDropped(g: SeoReviewGrounding | null | undefined): {
+  line: string;
+  items: { insight: string; reason: string }[];
+} | null {
+  const dropped = rows<{ reason?: unknown; insight?: unknown }>(g?.dropped);
+  if (!dropped.length) return null;
+  const n = dropped.length;
+  const allEvidence = dropped.every((d) => typeof d.reason === "string" && EVIDENCE_REASONS.has(d.reason));
+  return {
+    line: allEvidence
+      ? `${n} ${plural(n, "finding", "findings")} dropped — no evidence on your pages`
+      : `${n} ${plural(n, "finding", "findings")} dropped by the evidence check`,
+    items: dropped.map((d) => ({
+      insight: str(d.insight) ?? "A finding",
+      reason: (typeof d.reason === "string" && REVIEW_DROP_REASONS[d.reason]) || "it didn't pass the evidence check",
+    })),
+  };
+}
+
+/** A to-do's page: a link when it is a URL (site to-dos now cite the page),
+ *  plain text otherwise (an older review stored its evidence sentence here). */
+export function todoPage(page: string | null | undefined): { href: string | null; text: string } | null {
+  const p = str(page);
+  if (!p) return null;
+  if (!/^https?:\/\//i.test(p)) return { href: null, text: p };
+  try {
+    const u = new URL(p);
+    return { href: p, text: u.pathname === "/" ? u.hostname : u.pathname };
+  } catch {
+    return { href: null, text: p };
+  }
+}
+
+/** "3 more not shown", or null. */
+export function notShownLine(n: unknown): string | null {
+  return typeof n === "number" && n > 0 ? `${Math.round(n)} more not shown` : null;
+}
+
+/** A brief's schema: the types, and the note that says why — or why none. */
+export function briefSchema(b: Pick<SeoBrief, "schema_recommended" | "schema_note">): { types: string[]; note: string | null } {
+  const types = strs(b.schema_recommended);
+  const note = str(b.schema_note);
+  return { types, note: note ?? (types.length ? null : "No schema suggested for this page.") };
+}
+
+/** The "This week" strip's heading — or null, and no strip, for an empty plan. */
+export function planHeading(n: number): string | null {
+  if (n <= 0) return null;
+  if (n === 1) return "This week — do this one";
+  return `This week — do these ${["two", "three"][Math.min(n, 3) - 2]}`;
 }

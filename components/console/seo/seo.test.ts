@@ -1,15 +1,19 @@
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
+import { createElement } from "react";
+import { renderToStaticMarkup } from "react-dom/server";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { SeoTopic } from "@/lib/api";
+import type { SeoAuditIssue, SeoPageIntel, SeoTopic } from "@/lib/api";
 import { ApiError, apiCode, seoOauthComplete, seoOauthStart } from "../../../lib/api";
 import { describeFailure } from "../../../lib/load";
 import {
-  canConnectGsc, connectedLine, finishGoogleReturn, GA_SERVICE_ACCOUNT, GSC_CANCELLED, GSC_CONNECT_HINT,
-  GSC_CONNECT_UNAVAILABLE, gscFailure, gscIntegration, gscNotice, gscReturnPath, gscSlot, gscStateBrand,
-  googleReturn, looksRaw, NO_GSC_RETURN, plainNote, plainNotes, PLAIN_TOPIC_NOTES, readGsc, readGscReturn,
-  topicOrigin, type GoogleReturnIO, type NoteContext,
+  auditEvidence, auditTone, briefSchema, canConnectGsc, connectedLine, finishGoogleReturn, flagChip,
+  GA_SERVICE_ACCOUNT, GSC_CANCELLED, GSC_CONNECT_HINT, GSC_CONNECT_UNAVAILABLE, gscFailure, gscIntegration,
+  gscNotice, gscReturnPath, gscSlot, gscStateBrand, googleReturn, hiddenSuggestionsLine, looksRaw,
+  NO_GSC_RETURN, notShownLine, pageRec, planHeading, plainNote, plainNotes, PLAIN_TOPIC_NOTES, readGsc,
+  readGscReturn, reviewDropped, todoPage, topicOrigin, type GoogleReturnIO, type NoteContext,
 } from "./seo";
+import { AuditIssueRow, BriefSchema, HiddenSuggestions, PageRow, PlanStrip, ReviewDropped } from "./rows";
 
 /* Every Search Console, degraded-note and topic-provenance sentence the SEO
  * screens put up follows from these functions, so this pins what each payload
@@ -373,5 +377,209 @@ describe("topicOrigin — the source chip", () => {
     };
     expect(topicOrigin(old)).toEqual({ key: "idea", label: "AI idea", fromSeed: null });
     expect(topicOrigin({ ...old, source: "google suggestion" })).toEqual({ key: "google", label: "Google suggestion", fromSeed: null });
+  });
+});
+
+/* ------------------------------------- grounded advice (recs contract) -- */
+/* Rendered, not just computed: the contract's failures were things that
+ * showed up on screen — a bare "Rule: ", "low" on decorative images, an empty
+ * "This week" box. The rows live in `rows.tsx` so these can draw them. */
+
+const html = (el: Parameters<typeof renderToStaticMarkup>[0]) => renderToStaticMarkup(el);
+
+const page = (over: Partial<SeoPageIntel> = {}): SeoPageIntel => ({
+  path: "/services", url: "https://berry.com/services", title: "Services | Berry Virtual",
+  views: 120, sessions: 90, engagement_rate: 0.5, clicks: 14, impressions: 900, position: 8.2,
+  best_query: "virtual receptionist", flags: ["title-long"], recommendation: "Shorten the title under 60 characters.",
+  word_count: 640, ...over,
+});
+
+describe("page rows — rec_source", () => {
+  it("prints no recommendation line at all for a flags row", () => {
+    const out = html(createElement(PageRow, { p: page({ rec_source: "flags", recommendation: "" }) }));
+    expect(out).not.toContain("Rule:");
+    expect(out).not.toContain("seo-pages__rec");
+    expect(out).toContain("Title too long");
+  });
+
+  it("labels AI and rule advice by rec_source", () => {
+    expect(html(createElement(PageRow, { p: page({ rec_source: "ai", ai: true, recommendation: "Lead the title with “legal VA pricing”." }) })))
+      .toContain("AI: Lead the title with");
+    expect(html(createElement(PageRow, { p: page({ rec_source: "rule", recommendation: "Expand this page past 300 words." }) })))
+      .toContain("Rule: Expand this page past 300 words.");
+  });
+
+  it("renders an old-shape row (no rec_source) exactly as before", () => {
+    expect(pageRec(page({ ai: true }))).toEqual({ label: "AI", text: "Shorten the title under 60 characters." });
+    expect(pageRec(page({ ai: false }))).toEqual({ label: "Rule", text: "Shorten the title under 60 characters." });
+    expect(pageRec(page({ recommendation: "" }))).toBeNull();
+    expect(html(createElement(PageRow, { p: page() }))).toContain("Rule: Shorten the title");
+  });
+
+  it("gives every chip a readable label, known or not", () => {
+    expect(flagChip("images-no-alt")).toEqual({ label: "Images missing alt text", ok: false });
+    expect(flagChip("healthy")).toEqual({ label: "Healthy", ok: true });
+    expect(flagChip("multi_h1-found")).toEqual({ label: "Multi h1 found", ok: false });
+    expect(flagChip("--")).toEqual({ label: "Flag", ok: false });
+  });
+
+  it("says how many suggestions were hidden, quietly, and only when some were", () => {
+    const dropped = (n: number) => ({ kept: 3, dropped: Array.from({ length: n }, (_, i) => ({ path: `/p${i}`, reason: "repeats-flags", recommendation: "x", detail: "y" })) });
+    expect(hiddenSuggestionsLine(dropped(2))).toBe("2 suggestions hidden because they repeated the flags or didn't fit the page.");
+    expect(hiddenSuggestionsLine(dropped(1))).toBe("1 suggestion hidden because it repeated the flags or didn't fit the page.");
+    expect(hiddenSuggestionsLine(dropped(0))).toBeNull();
+    expect(hiddenSuggestionsLine(undefined)).toBeNull();
+    expect(html(createElement(HiddenSuggestions, {}))).toBe("");
+  });
+});
+
+const issue = (over: Partial<SeoAuditIssue> = {}): SeoAuditIssue => ({
+  issue: "Missing meta description", severity: "medium", count: 2,
+  pages: ["https://berry.com/a", "https://berry.com/b"], fix: "Write one.", ...over,
+});
+
+describe("audit findings — kind and evidence", () => {
+  it("renders decorative alt text as info, never a severity or 'missing'", () => {
+    const decorative = issue({
+      issue: "Images marked decorative (empty alt)", severity: "low", kind: "decorative-alt",
+      informational: true, images: 12, fix: "Not missing: alt=\"\" tells screen readers to skip the image.",
+    });
+    expect(auditTone(decorative)).toBe("info");
+    const out = html(createElement(AuditIssueRow, { issue: decorative }));
+    expect(out).toContain("seo-chip--sev-info");
+    expect(out).not.toContain("seo-chip--sev-low");
+    expect(out).toContain("12 images with alt=&quot;&quot; — not missing");
+  });
+
+  it("renders an old-shape finding (no kind) as before: severity, fix, pages", () => {
+    const out = html(createElement(AuditIssueRow, { issue: issue() }));
+    expect(out).toContain("seo-chip--sev-medium");
+    expect(out).toContain("https://berry.com/a");
+    expect(auditEvidence(issue())).toBeNull();
+    expect(auditEvidence(issue({ kind: null }))).toBeNull();
+  });
+
+  it("shows template images once, then the pages", () => {
+    const t = issue({ kind: "template-alt", severity: "low", srcs: ["/logo.svg", "/badge.png"], issue: "Template image(s) without alt text — fix once in the header/footer" });
+    expect(auditEvidence(t)).toEqual({ label: "Images in the shared header/footer", lines: ["/logo.svg", "/badge.png"], coversPages: false });
+    expect(html(createElement(AuditIssueRow, { issue: t }))).toContain("https://berry.com/b");
+  });
+
+  it("lists per-page evidence instead of repeating the bare page list", () => {
+    const fit = issue({
+      kind: "schema-fit", schema_type: "Service", severity: "medium", issue: "2 service pages lack Service schema",
+      evidence: [{ page: "https://berry.com/a", reason: "service page, no Service markup" }, { page: "https://berry.com/b", reason: "pricing page" }],
+    });
+    const ev = auditEvidence(fit);
+    expect(ev?.label).toBe("Why Service fits");
+    expect(ev?.coversPages).toBe(true);
+    const out = html(createElement(AuditIssueRow, { issue: fit }));
+    expect(out.split("https://berry.com/a").length - 1).toBe(1);
+
+    const parse = issue({ kind: "schema-error", examples: [{ page: "https://berry.com/a", error: "Expecting ',' delimiter" }] });
+    expect(auditEvidence(parse)?.lines).toEqual(["https://berry.com/a — Expecting ',' delimiter"]);
+    // one example of two pages: the list is still printed
+    expect(auditEvidence(parse)?.coversPages).toBe(false);
+
+    const alt = issue({ kind: "page-alt", examples: [{ page: "https://berry.com/a", srcs: ["/team.jpg"] }, { page: "https://berry.com/b", srcs: [] }] });
+    expect(auditEvidence(alt)?.lines).toEqual(["https://berry.com/a — /team.jpg", "https://berry.com/b"]);
+
+    const title = issue({ kind: "title-template", suffix: "| Berry Virtual", suffix_chars: 15 });
+    expect(auditEvidence(title)?.lines).toEqual(["“| Berry Virtual” adds 15 characters to every long title"]);
+  });
+
+  it("survives malformed evidence without inventing any", () => {
+    expect(auditEvidence(issue({ kind: "schema-fit", evidence: "nope" as never }))).toBeNull();
+    expect(auditEvidence(issue({ kind: "page-alt", examples: [null, { srcs: ["/x"] }] as never }))).toBeNull();
+    expect(auditEvidence(issue({ kind: "title-template" }))).toBeNull();
+    expect(auditEvidence(issue({ kind: "something-new" }))).toBeNull();
+  });
+});
+
+describe("the This-week strip", () => {
+  const item = (n: number) => ({ source: "fix list", action: `Move ${n}`, detail: `Why ${n}` });
+
+  it("draws nothing at all for an empty plan — no empty box", () => {
+    expect(html(createElement(PlanStrip, { plan: [] }))).toBe("");
+    expect(planHeading(0)).toBeNull();
+  });
+
+  it("counts in words for the 1–3 moves it may hold", () => {
+    expect(html(createElement(PlanStrip, { plan: [item(1)] }))).toContain("This week — do this one");
+    expect(html(createElement(PlanStrip, { plan: [item(1), item(2)] }))).toContain("This week — do these two");
+    const four = html(createElement(PlanStrip, { plan: [item(1), item(2), item(3), item(4)] }));
+    expect(four).toContain("do these three");
+    expect(four).not.toContain("Move 4");
+  });
+});
+
+describe("the site review's dropped findings", () => {
+  it("says 'no evidence' only when that is what every drop was", () => {
+    expect(reviewDropped({ kept: 4, dropped: [
+      { reason: "no-evidence-url", insight: "Add case studies", detail: "" },
+      { reason: "invented-number", insight: "Your bounce rate is 80%", detail: "" },
+    ] })?.line).toBe("2 findings dropped — no evidence on your pages");
+    const mixed = reviewDropped({ kept: 4, dropped: [
+      { reason: "duplicate", insight: "Add case studies", detail: "" },
+      { reason: "brand-new-reason", insight: "", detail: "" },
+    ] });
+    expect(mixed?.line).toBe("2 findings dropped by the evidence check");
+    expect(mixed?.items).toEqual([
+      { insight: "Add case studies", reason: "it repeated another finding" },
+      { insight: "A finding", reason: "it didn't pass the evidence check" },
+    ]);
+  });
+
+  it("is absent for an old review and for one that dropped nothing", () => {
+    expect(reviewDropped(null)).toBeNull();
+    expect(reviewDropped(undefined)).toBeNull();
+    expect(reviewDropped({ kept: 5, dropped: [] })).toBeNull();
+    expect(html(createElement(ReviewDropped, { grounding: null }))).toBe("");
+  });
+
+  it("renders as a disclosure behind one quiet line", () => {
+    const out = html(createElement(ReviewDropped, { grounding: { kept: 1, dropped: [{ reason: "audit-owned", insight: "Fix the titles", detail: "" }] } }));
+    expect(out).toContain("<details");
+    expect(out).toContain("1 finding dropped by the evidence check");
+    expect(out).toContain("already covered by the technical audit");
+  });
+});
+
+describe("fix list: page links, the cut, and briefs' schema", () => {
+  it("links a cited URL and leaves an old evidence sentence as text", () => {
+    expect(todoPage("https://berry.com/pricing")).toEqual({ href: "https://berry.com/pricing", text: "/pricing" });
+    expect(todoPage("https://berry.com/")).toEqual({ href: "https://berry.com/", text: "berry.com" });
+    expect(todoPage("The pricing page lists no fees")).toEqual({ href: null, text: "The pricing page lists no fees" });
+    expect(todoPage("")).toBeNull();
+    expect(todoPage("javascript:alert(1)")).toEqual({ href: null, text: "javascript:alert(1)" });
+  });
+
+  it("counts what the cap cut, and says nothing for an older run", () => {
+    expect(notShownLine(3)).toBe("3 more not shown");
+    expect(notShownLine(0)).toBeNull();
+    expect(notShownLine(undefined)).toBeNull();
+  });
+
+  it("shows the schema note as the reason, or as the answer when there are no types", () => {
+    expect(briefSchema({ schema_recommended: ["Article"], schema_note: "Seen on the ranking pages: Article (3 of 5 top pages)." }))
+      .toEqual({ types: ["Article"], note: "Seen on the ranking pages: Article (3 of 5 top pages)." });
+    expect(briefSchema({ schema_recommended: [], schema_note: "No schema seen on ranking pages." }))
+      .toEqual({ types: [], note: "No schema seen on ranking pages." });
+    // an older brief: types, no note
+    expect(briefSchema({ schema_recommended: ["Article", "FAQPage"] })).toEqual({ types: ["Article", "FAQPage"], note: null });
+    expect(briefSchema({ schema_recommended: [] })).toEqual({ types: [], note: "No schema suggested for this page." });
+    expect(html(createElement(BriefSchema, { brief: { schema_recommended: [], schema_note: "No schema seen on ranking pages." } })))
+      .toContain("No schema seen on ranking pages.");
+  });
+
+  it("the console draws these rows rather than its own copies", () => {
+    const agent = readFileSync(join(__dirname, "SeoAgent.tsx"), "utf8");
+    const labs = readFileSync(join(__dirname, "labs.tsx"), "utf8");
+    expect(agent).not.toContain('"Rule: "');
+    expect(agent).toContain("<PageRow key={p.path} p={p} />");
+    expect(agent).toContain("<PlanStrip plan={plan} />");
+    expect(agent).toContain("<ReviewDropped grounding={siteReview.grounding} />");
+    expect(labs).toContain("<AuditIssueRow");
+    expect(labs).toContain("<BriefSchema brief={b} />");
   });
 });

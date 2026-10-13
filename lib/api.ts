@@ -2737,6 +2737,8 @@ export interface SeoTodo {
   position: number;
   impressions: number | null;
   status: SeoTodoStatus;
+  /** Site-review to-dos: content / structure / trust / other. Absent on older runs. */
+  category?: string;
 }
 
 export interface SeoTopic {
@@ -2793,6 +2795,8 @@ export interface SeoRun {
   todos: SeoTodo[];
   topics: SeoTopic[];
   ga?: SeoGa | null;
+  /** Fixes cut from the list by its cap — absent (0) on older runs. */
+  todos_not_shown?: number;
 }
 
 export const seoOverview = (opts?: RequestOptions) =>
@@ -2816,6 +2820,14 @@ export interface SeoSiteIssue {
   action: string;
   priority: "high" | "medium" | "low";
   category: "content" | "structure" | "trust" | "other";
+  /** The crawled page the finding cites — absent on reviews stored before grounding. */
+  url?: string;
+}
+
+/** What the expert review's evidence check kept and threw away. */
+export interface SeoReviewGrounding {
+  kept?: number;
+  dropped?: { reason: string; insight: string; detail: string }[];
 }
 
 export interface SeoSiteReview {
@@ -2829,6 +2841,8 @@ export interface SeoSiteReview {
   covered_topics: string[];
   missing_topics: string[];
   degraded: string[];
+  /** Null/absent on reviews stored before the evidence check existed. */
+  grounding?: SeoReviewGrounding | null;
 }
 
 export interface SeoPlanItem {
@@ -2938,7 +2952,10 @@ export interface SeoBrief {
   questions: string[];
   entities: string[];
   target_word_count: number;
+  /** May be empty: nothing is recommended without evidence. */
   schema_recommended: string[];
+  /** Why those types, or why none — absent ("") on older briefs. */
+  schema_note?: string;
   internal_links: string[];
   who_ranks: { domain: string; title: string; position: number }[];
   our_position: number | null;
@@ -2952,6 +2969,23 @@ export interface SeoAuditIssue {
   count: number;
   pages: string[];
   fix: string;
+  /** Which finding this is, for its evidence — absent (null) on older reports:
+   *  title-template, title-long, template-alt, page-alt, decorative-alt,
+   *  schema-error, schema-fit. */
+  kind?: string | null;
+  /** title-template: the shared ending and its length. */
+  suffix?: string;
+  suffix_chars?: number;
+  /** template-alt: the header/footer image sources. */
+  srcs?: string[];
+  /** page-alt: images per page; schema-error: the parse error per page. */
+  examples?: { page: string; srcs?: string[]; error?: string }[];
+  /** decorative-alt: information, not a defect — unscored. */
+  informational?: boolean;
+  images?: number;
+  /** schema-fit: the type and why it fits each page. */
+  schema_type?: string;
+  evidence?: { page: string; reason: string }[];
 }
 
 export interface SeoSiteCheck {
@@ -3228,7 +3262,16 @@ export interface SeoPageIntel {
    *  slice + successful call). Older persisted docs lack the field — falsy is the
    *  honest default ("Rule:"), never assume AI wrote it. */
   ai?: boolean;
+  /** Where `recommendation` came from; absent reads as "rule". "flags" means
+   *  `recommendation` is empty on purpose — the chips are the message. */
+  rec_source?: "ai" | "rule" | "flags";
   word_count: number;
+}
+
+/** AI page advice the evidence check kept and threw away. */
+export interface SeoPagesGrounding {
+  kept?: number;
+  dropped?: { path: string; reason: string; recommendation: string; detail: string }[];
 }
 
 export interface SeoPagesDoc {
@@ -3236,6 +3279,8 @@ export interface SeoPagesDoc {
   at: string;
   ai: boolean;
   notes: string[];
+  /** Absent on docs built before the evidence check. */
+  grounding?: SeoPagesGrounding;
   pages: SeoPageIntel[];
 }
 

@@ -12,7 +12,8 @@ import { useAuth } from "@/lib/auth";
 import { Icon } from "@/lib/kit-ui";
 import { describeFailure, useLoadSession } from "@/lib/load";
 import { AskView, AuditView, BriefsView, CompetitorsView, KeywordsView, UpdatePlanButton } from "./labs";
-import { gscFailure, gscSlot, plainNotes, readGsc, topicOrigin, type NoteContext } from "./seo";
+import { gscFailure, gscSlot, notShownLine, plainNotes, readGsc, todoPage, topicOrigin, type NoteContext } from "./seo";
+import { HiddenSuggestions, PageRow, PlanStrip, ReviewDropped } from "./rows";
 
 type SeoTool = "ask" | "keywords" | "briefs" | "audit";
 
@@ -108,38 +109,11 @@ function PagesView({ doc, busy, error, onRefresh, noteCtx }: {
       </div>
       {/* the pages doc forwards the run's Search Console / Analytics failures */}
       <DegradedNotes notes={doc.notes} ctx={noteCtx} />
+      <HiddenSuggestions grounding={doc.grounding} />
       {doc.pages.length === 0 && (
         <div className="seo-empty">No pages found — run the site analysis, then refresh this tab.</div>
       )}
-      {doc.pages.map((p) => (
-        <div key={p.path} className="seo-pages__row">
-          <div className="seo-pages__main">
-            <div className="seo-pages__head">
-              {p.url ? (
-                <a className="seo-pages__path" href={p.url} target="_blank" rel="noreferrer">{p.path}</a>
-              ) : (
-                <span className="seo-pages__path">{p.path}</span>
-              )}
-              <span className="seo-pages__title">{p.title || "No title"}</span>
-            </div>
-            {p.flags.length > 0 && (
-              <div className="seo-pages__flags">
-                {p.flags.map((f) => <span key={f} className="seo-chip seo-chip--sev-medium">{f}</span>)}
-              </div>
-            )}
-            <div className="seo-pages__rec">{p.ai ? "AI: " : "Rule: "}{p.recommendation}</div>
-          </div>
-          <div className="seo-pages__nums">
-            <span>{fmt(p.views)} views</span>
-            <span>{fmt(p.sessions)} sessions</span>
-            <span>{Math.round(p.engagement_rate * 100)}% engaged</span>
-            <span>{fmt(p.clicks)} clicks</span>
-            <span>{fmt(p.impressions)} impressions</span>
-            <span>{p.position != null ? `pos ${p.position}` : "not ranked"}</span>
-            {p.best_query && <span className="seo-pages__query" title={p.best_query}>{p.best_query}</span>}
-          </div>
-        </div>
-      ))}
+      {doc.pages.map((p) => <PageRow key={p.path} p={p} />)}
     </div>
   );
 }
@@ -703,20 +677,7 @@ export function SeoAgent({ onToast, onBack, focusBrand }: {
 
             <Story run={run} />
 
-            {plan.length > 0 && (
-              <div className="seo-hero">
-                <div className="seo-hero__title">This week — do these {Math.min(plan.length, 3)}</div>
-                {plan.slice(0, 3).map((p, i) => (
-                  <div key={i} className="seo-hero__item">
-                    <span className="seo-hero__num">{i + 1}</span>
-                    <div className="seo-hero__body">
-                      <span className="seo-hero__action">{p.action}</span>
-                      <span className="seo-hero__detail">{p.detail}</span>
-                    </div>
-                  </div>
-                ))}
-              </div>
-            )}
+            <PlanStrip plan={plan} />
 
             {run && <DegradedNotes notes={run.degraded} ctx={noteCtx} />}
 
@@ -762,6 +723,7 @@ export function SeoAgent({ onToast, onBack, focusBrand }: {
                 <div className="seo-lab__meta">
                   Findings are in the Fix list with everything else — nothing to read twice.
                 </div>
+                <ReviewDropped grounding={siteReview.grounding} />
               </div>
               </Fold>
             )}
@@ -895,7 +857,18 @@ export function SeoAgent({ onToast, onBack, focusBrand }: {
                           <div className="seo-todo__action">{t.action}</div>
                           <div className="seo-todo__why">{t.why}</div>
                           <div className="seo-todo__meta">
-                            {!!t.page && <span>{shortPage(t.page)}</span>}
+                            {t.kind === "site" && t.category && <span>{t.category}</span>}
+                            {(() => {
+                              // Site to-dos cite the page's URL; an older review
+                              // stored its evidence sentence here instead.
+                              const pg = t.kind === "site" ? todoPage(t.page) : null;
+                              if (pg) {
+                                return pg.href
+                                  ? <a href={pg.href} target="_blank" rel="noreferrer">{pg.text}</a>
+                                  : <span>{pg.text}</span>;
+                              }
+                              return t.page ? <span>{shortPage(t.page)}</span> : null;
+                            })()}
                             {t.est_monthly_clicks != null && t.position > 0 && <span>pos {t.position}</span>}
                             {t.impressions != null && <span>{fmt(t.impressions)} impressions</span>}
                           </div>
@@ -915,6 +888,9 @@ export function SeoAgent({ onToast, onBack, focusBrand }: {
                       <button className="seo-btn seo-todo__more" onClick={() => setShowAllTodos((v) => !v)}>
                         {showAllTodos ? "Show top 10 only" : `Show all ${run.todos.length}`}
                       </button>
+                    )}
+                    {notShownLine(run.todos_not_shown) && (
+                      <div className="seo-lab__meta">{notShownLine(run.todos_not_shown)}</div>
                     )}
                   </div>
                 )}

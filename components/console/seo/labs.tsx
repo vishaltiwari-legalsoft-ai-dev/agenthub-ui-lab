@@ -12,6 +12,8 @@ import {
 import type { ToastFn } from "@/components/console/ConsoleApp";
 import { Icon } from "@/lib/kit-ui";
 import { describeFailure } from "@/lib/load";
+import { AuditIssueRow, BriefSchema } from "./rows";
+import { auditTone, briefSchema } from "./seo";
 
 /** Researcher-layer tabs for the SEO agent: Keywords, Competitors, Briefs, Audit. */
 
@@ -511,7 +513,10 @@ function briefMarkdown(b: SeoBrief): string {
     b.questions.length ? `## Answer these questions\n${b.questions.map((q) => `- ${q}`).join("\n")}` : "",
     b.entities.length ? `## Terms to include\n${b.entities.join(", ")}` : "",
     b.internal_links.length ? `## Link internally to\n${b.internal_links.map((l) => `- ${l}`).join("\n")}` : "",
-    `## Schema\n${b.schema_recommended.join(", ")}`,
+    (() => {
+      const { types, note } = briefSchema(b);
+      return `## Schema\n${[types.join(", "), note].filter(Boolean).join("\n")}`;
+    })(),
   ].filter(Boolean).join("\n");
 }
 
@@ -618,6 +623,7 @@ export function BriefsView({ brandId, onToast }: { brandId: string; onToast: Toa
               {b.internal_links.map((l) => <div key={l} className="seo-brief__line">{l}</div>)}
             </div>
           )}
+          <BriefSchema brief={b} />
         </details>
       ))}
     </div>
@@ -637,7 +643,7 @@ async function copyReport(brandName: string, r: SeoAuditReport, onToast: ToastFn
     "## Issues",
     ...(r.issues.length
       ? r.issues.flatMap((i) => [
-          `### ${i.issue} (${i.severity}, ${i.count} page${i.count === 1 ? "" : "s"})`,
+          `### ${i.issue} (${auditTone(i)}, ${i.count} page${i.count === 1 ? "" : "s"})`,
           `Fix: ${i.fix}`,
           ...i.pages.map((p) => `- ${p}`),
         ])
@@ -706,7 +712,7 @@ export function AuditView({ brandId, brandName, onToast }: {
         {reportError && (
           <LoadError what="the last audit" error={reportError} onRetry={() => setRetry((n) => n + 1)} />
         )}
-        {!report && !reportError && <div className="seo-empty">No audit yet — the scan finds broken pages, missing titles/descriptions, duplicate metadata, and missing structured data. Nothing is changed automatically.</div>}
+        {!report && !reportError && <div className="seo-empty">No audit yet — the scan finds broken pages, missing titles/descriptions, duplicate metadata, and structured data that is broken or missing where it fits. Nothing is changed automatically.</div>}
         {report && (
           <>
             <div className="seo-audit__score">
@@ -728,17 +734,7 @@ export function AuditView({ brandId, brandName, onToast }: {
               </div>
             )}
             {!report.issues.length && <div className="seo-empty">Clean — nothing to fix at this depth.</div>}
-            {report.issues.map((i) => (
-              <details key={i.issue} className="seo-issue">
-                <summary>
-                  <span className={`seo-chip seo-chip--sev-${i.severity}`}>{i.severity}</span>
-                  <span className="seo-cluster__name">{i.issue}</span>
-                  <span className="seo-cluster__nums">{i.count} page(s)</span>
-                </summary>
-                <div className="seo-issue__fix">{i.fix}</div>
-                {i.pages.map((p) => <div key={p} className="seo-brief__line">{p}</div>)}
-              </details>
-            ))}
+            {report.issues.map((i) => <AuditIssueRow key={`${i.kind ?? ""}|${i.issue}`} issue={i} />)}
           </>
         )}
       </div>
