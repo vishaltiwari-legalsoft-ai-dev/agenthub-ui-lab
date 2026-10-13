@@ -42,16 +42,22 @@ const str = (v: unknown): string | null => (typeof v === "string" && v.trim() ? 
 export const GSC_CONNECT_HINT = "Sign in with the Google account that has Search Console access to this site.";
 /** Shown instead of a button when the server cannot finish the connect. */
 export const GSC_CONNECT_UNAVAILABLE = "Search Console connect isn't set up on this server yet.";
+/** A stored grant for some other site: not connected, and never "Connected by". */
+export const GSC_MISMATCH = "Search Console connection is for a different site — reconnect it.";
 /** Google Analytics has no connect flow — it is never drawn as a button. */
 export const GA_SERVICE_ACCOUNT =
   "Google Analytics is read through our service account — a GA admin adds it as a Viewer on the property.";
 
 /** A brand's Search Console block with every field present. `fallbackConnected`
- *  is the card's legacy `gsc_connected`, for a backend that sends no block. */
+ *  is the card's legacy `gsc_connected`, for a backend that sends no block.
+ *  A GEO-only caller's cards carry neither, and read as not connected. A
+ *  mismatched grant is never connected, whatever else the block says. */
 export function readGsc(raw: Partial<SeoGscStatus> | null | undefined, fallbackConnected?: boolean): Required<SeoGscStatus> {
   const g = raw ?? {};
+  const mismatch = g.mismatch === true;
   return {
-    connected: typeof g.connected === "boolean" ? g.connected : fallbackConnected === true,
+    mismatch,
+    connected: !mismatch && (typeof g.connected === "boolean" ? g.connected : fallbackConnected === true),
     property: str(g.property),
     connected_by: str(g.connected_by),
     connected_at: str(g.connected_at),
@@ -86,25 +92,27 @@ export function connectedLine(g: Pick<SeoGscStatus, "connected" | "connected_by"
 
 /** What the brand's action bar offers for Search Console.
  *  - `connected` — a chip, and the creator's Disconnect.
- *  - `connect` — a live button with the sign-in hint under it.
+ *  - `connect` — a live button with the sign-in hint under it (or, for a
+ *    grant on the wrong site, the line saying so).
  *  - `unavailable` — no button, one plain line.
- *  - `unknown` — the overview has not answered yet; draw nothing rather than
- *    flash "not set up" at a server where it is. */
+ *  - `unknown` — the overview has not answered yet; no button, and no "not
+ *    set up" flashed at a server where it is — only the mismatch line, which
+ *    does not depend on the server. */
 export type GscSlot =
   | { mode: "connected"; line: string | null }
   | { mode: "connect"; line: string }
   | { mode: "unavailable"; line: string }
-  | { mode: "unknown"; line: null };
+  | { mode: "unknown"; line: string | null };
 
 export function gscSlot(
-  g: Pick<SeoGscStatus, "connected" | "connected_by" | "connected_at"> | null,
+  g: Pick<SeoGscStatus, "connected" | "connected_by" | "connected_at" | "mismatch"> | null,
   sources: Partial<SeoOverview["sources"]> | null | undefined,
 ): GscSlot {
-  if (g?.connected) return { mode: "connected", line: connectedLine(g) };
-  if (!sources) return { mode: "unknown", line: null };
-  return canConnectGsc(sources)
-    ? { mode: "connect", line: GSC_CONNECT_HINT }
-    : { mode: "unavailable", line: GSC_CONNECT_UNAVAILABLE };
+  const mismatch = g?.mismatch === true;
+  if (g?.connected && !mismatch) return { mode: "connected", line: connectedLine(g) };
+  if (!sources) return { mode: "unknown", line: mismatch ? GSC_MISMATCH : null };
+  if (canConnectGsc(sources)) return { mode: "connect", line: mismatch ? GSC_MISMATCH : GSC_CONNECT_HINT };
+  return { mode: "unavailable", line: mismatch ? `${GSC_MISMATCH} ${GSC_CONNECT_UNAVAILABLE}` : GSC_CONNECT_UNAVAILABLE };
 }
 
 /** The Integrations row. Connected only on the backend's word that some brand
@@ -123,14 +131,15 @@ export function gscIntegration(sources: Partial<SeoOverview["sources"]> | null |
 }
 
 /** The dashboard's Search Console notice, from the figures themselves:
- *  `measured` when the run has Search Console clicks, `pending` when a grant
- *  exists but these figures predate it (or could not use it), `off` when there
- *  is neither. */
+ *  `measured` when the run has Search Console clicks, `mismatch` when the
+ *  stored grant is for another site, `pending` when a grant exists but these
+ *  figures predate it (or could not use it), `off` when there is none. */
 export function gscNotice(
-  gsc: Pick<SeoGscStatus, "connected">,
+  gsc: Pick<SeoGscStatus, "connected" | "mismatch">,
   summary: { mode?: string; impressions_28d: number },
-): "measured" | "pending" | "off" {
+): "measured" | "mismatch" | "pending" | "off" {
   if (summary.mode !== "rank-tracking" && summary.impressions_28d > 0) return "measured";
+  if (gsc.mismatch === true) return "mismatch";
   return gsc.connected ? "pending" : "off";
 }
 
@@ -222,6 +231,7 @@ const RETURN_SENTENCES: Record<string, (site: string) => string> = {
   gsc_no_property: (site) => `Search Console wasn't connected — this Google account has no Search Console access to ${site}. Sign in with an account that does, or ask the site owner to add it.`,
   gsc_exchange_failed: () => "Search Console wasn't connected — Google didn't complete the permission. Press Connect again; if it keeps failing, remove AgentOS at myaccount.google.com/permissions first.",
   gsc_google_unavailable: () => "Search Console wasn't connected — Google didn't answer properly. Press Connect again.",
+  gsc_property_taken: () => "Search Console wasn't connected — that Search Console property is already connected to another brand.",
 };
 
 /** The sentence for a return code. `site` is the brand's domain as the
@@ -453,7 +463,7 @@ const FLAG_LABELS: Record<string, string> = {
   "no-meta": "No meta description",
   "meta-long": "Meta description too long",
   "thin": "Thin content",
-  // the per-row "thin" / "Healthy — keep it fresh…" sentences becoming chips
+  // `rec_chip`: the per-row "thin" / "Healthy — keep it fresh…" sentences as chips
   "thin-content": "Thin content",
   "no-h1": "No H1",
   "images-no-alt": "Images missing alt text",
@@ -465,6 +475,20 @@ export function flagChip(id: string): { label: string; ok: boolean } {
   const label = FLAG_LABELS[id]
     ?? (id.replace(/[-_]+/g, " ").trim().replace(/^\w/, (c) => c.toUpperCase()) || "Flag");
   return { label, ok: id === "healthy" };
+}
+
+/** A page row's chips: its `flags`, then its `rec_chip` — each label once. A
+ *  thin page carries `thin` in `flags` and `thin-content` as its `rec_chip`;
+ *  both read "Thin content", and the row says it once. */
+export function pageChips(p: Pick<SeoPageIntel, "flags" | "rec_chip">): { key: string; label: string; ok: boolean }[] {
+  const ids = [...(Array.isArray(p.flags) ? p.flags : []), ...(str(p.rec_chip) ? [String(p.rec_chip).trim()] : [])];
+  const out: { key: string; label: string; ok: boolean }[] = [];
+  for (const id of ids) {
+    if (typeof id !== "string" || !id) continue;
+    const chip = flagChip(id);
+    if (!out.some((c) => c.label === chip.label)) out.push({ key: id, ...chip });
+  }
+  return out;
 }
 
 /** The page row's advice line: "AI: …" / "Rule: …", or none at all. A

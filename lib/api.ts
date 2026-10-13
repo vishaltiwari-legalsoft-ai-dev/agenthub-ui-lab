@@ -2824,6 +2824,9 @@ export interface SeoGscStatus {
   service_account_property?: string | null;
   /** The latest run's summary is in Search Console mode. */
   reading?: boolean;
+  /** A stored grant is for a different site than this brand's — `connected`
+   *  is then false. Absent (false) on older backends. */
+  mismatch?: boolean;
 }
 
 export interface SeoSiteIssue {
@@ -3277,6 +3280,10 @@ export interface SeoPageIntel {
   /** Where `recommendation` came from; absent reads as "rule". "flags" means
    *  `recommendation` is empty on purpose — the chips are the message. */
   rec_source?: "ai" | "rule" | "flags";
+  /** The row's one-word verdict when `rec_source` is "flags": "healthy",
+   *  "thin-content", "meta-long", "not-crawled" — more may come. Not part of
+   *  `flags`. Absent (null) on older docs. */
+  rec_chip?: string | null;
   word_count: number;
 }
 

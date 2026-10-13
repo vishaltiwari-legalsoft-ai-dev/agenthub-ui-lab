@@ -3,7 +3,7 @@ import { join } from "node:path";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { SeoAuditIssue, SeoPageIntel, SeoTopic } from "@/lib/api";
+import type { SeoAuditIssue, SeoBrandCard, SeoPageIntel, SeoTopic } from "@/lib/api";
 import {
   API_URL, ApiError, apiCode, RequestTimeoutError, seoBrandDetail, seoOauthComplete, seoOauthDisconnect, seoOauthStart,
   seoPages, seoPagesRefresh, seoSetTodoStatus,
@@ -11,7 +11,7 @@ import {
 import { describeFailure } from "../../../lib/load";
 import {
   auditEvidence, auditTone, briefSchema, canConnectGsc, connectedLine, finishGoogleReturn, flagChip,
-  GA_SERVICE_ACCOUNT, GSC_CANCELLED, GSC_CONNECT_HINT, GSC_CONNECT_UNAVAILABLE, GSC_RETRY, GSC_UNFINISHED, gscFailure,
+  GA_SERVICE_ACCOUNT, GSC_CANCELLED, GSC_MISMATCH, pageChips, GSC_CONNECT_HINT, GSC_CONNECT_UNAVAILABLE, GSC_RETRY, GSC_UNFINISHED, gscFailure,
   gscIntegration, gscReturnSentence,
   gscNotice, gscReturnPath, gscSlot, gscStateBrand, googleReturn, hiddenSuggestionsLine, looksRaw,
   NO_GSC_RETURN, notShownLine, pageRec, planHeading, plainFailure, plainMessage, plainNote, plainNotes, PLAIN_TOPIC_NOTES, readGsc,
@@ -70,7 +70,7 @@ describe("readGsc / connectedLine", () => {
   it("defaults every field a pre-relay backend does not send", () => {
     expect(readGsc(undefined, true)).toEqual({
       connected: true, property: null, connected_by: null, connected_at: null,
-      service_account_property: null, reading: false,
+      service_account_property: null, reading: false, mismatch: false,
     });
     expect(readGsc(null).connected).toBe(false);
     expect(readGsc({ connected: false, property: null }).connected_by).toBeNull();
@@ -702,7 +702,8 @@ describe("the dashboard opens the console on its brand", () => {
     const ws = readFileSync(join(__dirname, "../../hub/work/SeoWorkspace.tsx"), "utf8");
     const agent = readFileSync(join(__dirname, "SeoAgent.tsx"), "utf8");
     expect(dash).not.toContain('openWork("seo", brandId, "console")');
-    expect(dash.match(/onOpenConsole\(brandId\)/g)).toHaveLength(3);
+    // connect, reconnect (mismatch), open (pending), work the list
+    expect(dash.match(/onOpenConsole\(brandId\)/g)).toHaveLength(4);
     expect(ws).toContain("onOpenConsole={openInConsole}");
     expect(ws).toContain("focusBrand={focus} onFocused={releaseFocus}");
     expect(ws).toMatch(/setFocus\(id\);\s*openWork\("seo", id, "console"\);/);
@@ -841,5 +842,115 @@ describe("the Search Console return toast", () => {
     const ws = readFileSync(join(__dirname, "../../hub/work/SeoWorkspace.tsx"), "utf8");
     expect(ws).toContain("toast(gscReturnSentence(ret.code, known?.domain), \"error\")");
     expect(ws).not.toMatch(/toast\(ret\.(error|code)\b/);
+  });
+});
+
+/* ------------------------------------------- the final backend contract -- */
+
+describe("page rows: rec_chip, outside flags", () => {
+  it("labels the verdict chips, and anything new readably", () => {
+    expect(pageChips({ flags: [], rec_chip: "healthy" })).toEqual([{ key: "healthy", label: "Healthy", ok: true }]);
+    expect(pageChips({ flags: [], rec_chip: "meta-long" })).toEqual([{ key: "meta-long", label: "Meta description too long", ok: false }]);
+    expect(pageChips({ flags: [], rec_chip: "not-crawled" })).toEqual([{ key: "not-crawled", label: "Not in the site crawl", ok: false }]);
+    expect(pageChips({ flags: [], rec_chip: "stale-content" })).toEqual([{ key: "stale-content", label: "Stale content", ok: false }]);
+  });
+
+  it("says Thin content once on a thin row, where it is both a flag and the chip", () => {
+    expect(pageChips({ flags: ["thin", "no-h1"], rec_chip: "thin-content" }).map((c) => c.label)).toEqual(["Thin content", "No H1"]);
+    const out = html(createElement(PageRow, { p: page({ rec_source: "flags", recommendation: "", flags: ["thin"], rec_chip: "thin-content" }) }));
+    expect(out.split("Thin content").length - 1).toBe(1);
+    expect(out).not.toContain("Rule:");
+  });
+
+  it("draws a healthy flags row as one green chip and no sentence", () => {
+    const out = html(createElement(PageRow, { p: page({ rec_source: "flags", recommendation: "", flags: [], rec_chip: "healthy" }) }));
+    expect(out).toContain('<span class="seo-chip seo-chip--on">Healthy</span>');
+    expect(out).not.toContain("seo-pages__rec");
+  });
+
+  it("renders an older row with no rec_chip from its flags alone", () => {
+    expect(pageChips({ flags: ["title-long"] })).toEqual([{ key: "title-long", label: "Title too long", ok: false }]);
+    expect(pageChips({ flags: ["title-long"], rec_chip: null })).toHaveLength(1);
+    expect(pageChips({ flags: [] })).toEqual([]);
+  });
+});
+
+describe("gsc_property_taken on the return", () => {
+  it("has its own fixed sentence", () => {
+    expect(gscReturnSentence("gsc_property_taken", "berry.com"))
+      .toBe("Search Console wasn't connected — that Search Console property is already connected to another brand.");
+    expect(toastFor("#/w/seo/b/console?gsc=gsc_property_taken")).not.toBe(GSC_RETRY);
+  });
+
+  it("rides the link as its code when the complete call answers 409", async () => {
+    const go = vi.fn();
+    await finishGoogleReturn(googleReturn(`?${new URLSearchParams({ code: "c", state: STATE })}`), {
+      completeGsc: async () => {
+        throw new ApiError("x", 409, { detail: { code: "gsc_property_taken", message: "That Search Console property is already connected to another brand." } });
+      },
+      inbox: vi.fn(),
+      go,
+    });
+    expect(go).toHaveBeenCalledWith("/#/w/seo/berry-virtual/console?gsc=gsc_property_taken");
+  });
+});
+
+describe("a grant for a different site (mismatch)", () => {
+  const block = { connected: false, property: "sc-domain:other.com", connected_by: "ana@berry.com", connected_at: "2026-10-14T12:00:00Z", mismatch: true };
+
+  it("is never connected, even if a block claims both", () => {
+    expect(readGsc(block).connected).toBe(false);
+    expect(readGsc({ ...block, connected: true }).connected).toBe(false);
+    expect(readGsc({ ...block, connected: true }).mismatch).toBe(true);
+  });
+
+  it("offers Connect with the reconnect line, never 'Connected by'", () => {
+    const slot = gscSlot(readGsc({ ...block, connected: true }), { gsc: true, serp: true, gsc_connect: true });
+    expect(slot).toEqual({ mode: "connect", line: GSC_MISMATCH });
+    expect(GSC_MISMATCH).toBe("Search Console connection is for a different site — reconnect it.");
+    expect(slot.line).not.toContain("Connected by");
+  });
+
+  it("says so without a button where connect is not set up, or before the overview answers", () => {
+    expect(gscSlot(readGsc(block), { gsc: false, serp: true, gsc_connect: false }))
+      .toEqual({ mode: "unavailable", line: `${GSC_MISMATCH} ${GSC_CONNECT_UNAVAILABLE}` });
+    expect(gscSlot(readGsc(block), null)).toEqual({ mode: "unknown", line: GSC_MISMATCH });
+  });
+
+  it("is its own dashboard notice unless the run measured clicks anyway", () => {
+    expect(gscNotice(readGsc(block), { mode: "rank-tracking", impressions_28d: 0 })).toBe("mismatch");
+    expect(gscNotice(readGsc(block), { mode: "search-console", impressions_28d: 500 })).toBe("measured");
+  });
+});
+
+describe("a GEO-only caller's overview: no gsc block, no gsc_connected", () => {
+  const geoOnly: SeoBrandCard = {
+    brand: { id: "berry", name: "Berry Virtual", domain: "berry.com", gsc_property: "", seeds: [], enabled: true },
+    headline: null,
+    last_run: null,
+  };
+
+  it("reads every Search Console field as its default", () => {
+    expect(readGsc(geoOnly.gsc, geoOnly.gsc_connected)).toEqual({
+      connected: false, property: null, connected_by: null, connected_at: null,
+      service_account_property: null, reading: false, mismatch: false,
+    });
+  });
+
+  it("feeds the card chip, the action bar and the dashboard notice without a gap", () => {
+    const g = readGsc(geoOnly.gsc, geoOnly.gsc_connected);
+    expect(g.connected).toBe(false); // the card draws no "GSC ✓"
+    expect(gscSlot(g, { gsc: false, serp: true })).toEqual({ mode: "unavailable", line: GSC_CONNECT_UNAVAILABLE });
+    expect(gscSlot(g, { gsc: false, serp: true, gsc_connect: true })).toEqual({ mode: "connect", line: GSC_CONNECT_HINT });
+    expect(gscNotice(g, { mode: "rank-tracking", impressions_28d: 0 })).toBe("off");
+    expect(connectedLine(g)).toBeNull();
+  });
+
+  it("every screen reads the card through readGsc, never the fields directly", () => {
+    const agent = readFileSync(join(__dirname, "SeoAgent.tsx"), "utf8");
+    const dash = readFileSync(join(__dirname, "../../hub/work/seo/SeoDashboard.tsx"), "utf8");
+    expect(agent).toContain("readGsc(gscCard, gsc_connected).connected");
+    expect(dash).toContain("readGsc(card.gsc, card.gsc_connected)");
+    for (const src of [agent, dash]) expect(src).not.toMatch(/card\.gsc\.|gscCard\.|gsc_connected &&/);
   });
 });

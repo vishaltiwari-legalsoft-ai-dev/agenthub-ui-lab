@@ -21,7 +21,7 @@
 import { useEffect, useState } from "react";
 import { seoBrandDetail, type SeoBrandCard, type SeoRun, type SeoTodo } from "@/lib/api";
 import { loadPending, useLoadSession, type Load } from "@/lib/load";
-import { GSC_CONNECT_UNAVAILABLE, gscNotice, plainMessage, plainNotes, readGsc } from "@/components/console/seo/seo";
+import { GSC_CONNECT_UNAVAILABLE, GSC_MISMATCH, gscNotice, plainMessage, plainNotes, readGsc } from "@/components/console/seo/seo";
 import { useHub } from "../../context";
 import { n } from "../../model";
 import { Blank, Oops, Wait } from "../../ui";
@@ -256,7 +256,7 @@ export function SeoDashboard({ card, connectReady, onOpenConsole }: {
   const notice = gscNotice(gsc, s);
   // With the "not connected" line up, the run's own Search Console note would
   // say the same thing twice and point at a button this page does not have.
-  const notes = plainNotes(notice === "off"
+  const notes = plainNotes(notice === "off" || notice === "mismatch"
     ? run.degraded.filter((d) => !(typeof d === "string" && d.startsWith("Search Console")))
     : run.degraded, {
     site: card.brand.domain || "this site",
@@ -276,6 +276,18 @@ export function SeoDashboard({ card, connectReady, onOpenConsole }: {
               {connectReady ? (
                 <button type="button" className="sdb-link" onClick={() => onOpenConsole(brandId)}>
                   Connect it in the console
+                </button>
+              ) : (
+                <> {GSC_CONNECT_UNAVAILABLE}</>
+              )}
+            </p>
+          )}
+          {notice === "mismatch" && (
+            <p>
+              <b>{GSC_MISMATCH}</b>
+              {connectReady ? (
+                <button type="button" className="sdb-link" onClick={() => onOpenConsole(brandId)}>
+                  Reconnect in the console
                 </button>
               ) : (
                 <> {GSC_CONNECT_UNAVAILABLE}</>

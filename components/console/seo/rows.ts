@@ -10,15 +10,16 @@
 
 import { createElement as h, type ReactNode } from "react";
 import type { SeoAuditIssue, SeoBrief, SeoPageIntel, SeoPagesGrounding, SeoPlanItem, SeoReviewGrounding } from "@/lib/api";
-import { auditEvidence, auditTone, briefSchema, flagChip, hiddenSuggestionsLine, pageRec, planHeading, reviewDropped } from "./seo";
+import { auditEvidence, auditTone, briefSchema, hiddenSuggestionsLine, pageChips, pageRec, planHeading, reviewDropped } from "./seo";
 
 const fmt = (n: number) => n.toLocaleString("en-US");
 
-/** One page in the Pages tab: its flags as chips, its advice as one line —
- *  or no line, when the chips are the whole message. */
+/** One page in the Pages tab: its flags and `rec_chip` as chips (each label
+ *  once), its advice as one line — or no line, when the chips are the whole
+ *  message. */
 export function PageRow({ p }: { p: SeoPageIntel }): ReactNode {
   const rec = pageRec(p);
-  const flags = Array.isArray(p.flags) ? p.flags : [];
+  const chips = pageChips(p);
   return h("div", { className: "seo-pages__row" },
     h("div", { className: "seo-pages__main" },
       h("div", { className: "seo-pages__head" },
@@ -27,11 +28,9 @@ export function PageRow({ p }: { p: SeoPageIntel }): ReactNode {
           : h("span", { className: "seo-pages__path" }, p.path),
         h("span", { className: "seo-pages__title" }, p.title || "No title"),
       ),
-      flags.length > 0 && h("div", { className: "seo-pages__flags" },
-        flags.map((f) => {
-          const chip = flagChip(f);
-          return h("span", { key: f, className: `seo-chip ${chip.ok ? "seo-chip--on" : "seo-chip--sev-medium"}` }, chip.label);
-        }),
+      chips.length > 0 && h("div", { className: "seo-pages__flags" },
+        chips.map((chip) =>
+          h("span", { key: chip.key, className: `seo-chip ${chip.ok ? "seo-chip--on" : "seo-chip--sev-medium"}` }, chip.label)),
       ),
       rec && h("div", { className: "seo-pages__rec" }, `${rec.label}: ${rec.text}`),
     ),
