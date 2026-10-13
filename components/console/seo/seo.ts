@@ -1,0 +1,354 @@
+/** What the SEO agent's payloads mean on screen — pure, no React, no DOM.
+ *
+ *  Four readings live here because each one used to be decided inline and got
+ *  something untrue onto the page:
+ *
+ *  - **Search Console.** The Connect button rendered on servers where the
+ *    connect flow could not finish, and the help text told people to share
+ *    the property with a service account — contradicting the button beside
+ *    it. `sources.gsc_connect` now decides whether a live button exists at all.
+ *  - **The Google return.** `/oauth/google` serves two specialists. A state
+ *    starting `gsc.` is Search Console's; anything else is the Inbox Triage
+ *    path, untouched.
+ *  - **Degraded notes.** A run's `degraded` list carries raw exception text
+ *    (`Search Console: <HttpError 403 …>`). Known prefixes become a plain
+ *    sentence; anything that still looks like a stack or a status line is
+ *    replaced, never quoted.
+ *  - **Topic provenance.** Every blog topic now says where it came from.
+ *
+ *  Every new backend field is read with a default, because Vercel and Cloud
+ *  Run deploy at different times and the older shape must still render.
+ */
+
+import type { SeoGscStatus, SeoOverview, SeoTopic } from "@/lib/api";
+// Values come in by relative path: the test suite runs without the `@/` alias,
+// which only erased type imports can use.
+import { apiBody, apiCode, apiStatus, isTimeoutError } from "../../../lib/api";
+import { describeFailure } from "../../../lib/load";
+
+const str = (v: unknown): string | null => (typeof v === "string" && v.trim() ? v.trim() : null);
+
+/* ------------------------------------------------------ Search Console -- */
+
+/** Shown under the Connect button. The consent screen is external, so any
+ *  Google account that has access to the property can connect. */
+export const GSC_CONNECT_HINT = "Sign in with the Google account that has Search Console access to this site.";
+/** Shown instead of a button when the server cannot finish the connect. */
+export const GSC_CONNECT_UNAVAILABLE = "Search Console connect isn't set up on this server yet.";
+/** Google Analytics has no connect flow — it is never drawn as a button. */
+export const GA_SERVICE_ACCOUNT =
+  "Google Analytics is read through our service account — a GA admin adds it as a Viewer on the property.";
+
+/** A brand's Search Console block with every field present. `fallbackConnected`
+ *  is the card's legacy `gsc_connected`, for a backend that sends no block. */
+export function readGsc(raw: Partial<SeoGscStatus> | null | undefined, fallbackConnected?: boolean): Required<SeoGscStatus> {
+  const g = raw ?? {};
+  return {
+    connected: typeof g.connected === "boolean" ? g.connected : fallbackConnected === true,
+    property: str(g.property),
+    connected_by: str(g.connected_by),
+    connected_at: str(g.connected_at),
+    service_account_property: str(g.service_account_property),
+    reading: g.reading === true,
+  };
+}
+
+/** Whether a live Connect button may be drawn. A backend older than the field
+ *  had no working connect flow, so missing means no. */
+export const canConnectGsc = (sources: Partial<SeoOverview["sources"]> | null | undefined): boolean =>
+  sources?.gsc_connect === true;
+
+/** "Oct 14, 2026" in the reader's zone; null for anything unparseable. */
+export function shortDate(iso: string | null | undefined): string | null {
+  if (!iso) return null;
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return null;
+  return d.toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" });
+}
+
+/** "Connected by ana@brand.com · Oct 14, 2026", or as much of it as is known. */
+export function connectedLine(g: Pick<SeoGscStatus, "connected" | "connected_by" | "connected_at">): string | null {
+  if (!g.connected) return null;
+  const by = str(g.connected_by);
+  const when = shortDate(g.connected_at);
+  if (by && when) return `Connected by ${by} · ${when}`;
+  if (by) return `Connected by ${by}`;
+  if (when) return `Connected · ${when}`;
+  return null;
+}
+
+/** What the brand's action bar offers for Search Console.
+ *  - `connected` — a chip, and the creator's Disconnect.
+ *  - `connect` — a live button with the sign-in hint under it.
+ *  - `unavailable` — no button, one plain line.
+ *  - `unknown` — the overview has not answered yet; draw nothing rather than
+ *    flash "not set up" at a server where it is. */
+export type GscSlot =
+  | { mode: "connected"; line: string | null }
+  | { mode: "connect"; line: string }
+  | { mode: "unavailable"; line: string }
+  | { mode: "unknown"; line: null };
+
+export function gscSlot(
+  g: Pick<SeoGscStatus, "connected" | "connected_by" | "connected_at"> | null,
+  sources: Partial<SeoOverview["sources"]> | null | undefined,
+): GscSlot {
+  if (g?.connected) return { mode: "connected", line: connectedLine(g) };
+  if (!sources) return { mode: "unknown", line: null };
+  return canConnectGsc(sources)
+    ? { mode: "connect", line: GSC_CONNECT_HINT }
+    : { mode: "unavailable", line: GSC_CONNECT_UNAVAILABLE };
+}
+
+/** The Integrations row. Connected only on the backend's word that some brand
+ *  really has Search Console behind it; otherwise "Not connected" with the
+ *  hint that fits this server. `console` is set only when there is a working
+ *  button to send the reader to. */
+export function gscIntegration(sources: Partial<SeoOverview["sources"]> | null | undefined): {
+  status: "on" | "off";
+  note?: string;
+  open: "dashboard" | "console" | null;
+} {
+  if (sources?.gsc === true) return { status: "on", open: "dashboard" };
+  return canConnectGsc(sources)
+    ? { status: "off", note: "Connect it per brand in the SEO console", open: "console" }
+    : { status: "off", note: GSC_CONNECT_UNAVAILABLE, open: null };
+}
+
+/** The dashboard's Search Console notice, from the figures themselves:
+ *  `measured` when the run has Search Console clicks, `pending` when a grant
+ *  exists but these figures predate it (or could not use it), `off` when there
+ *  is neither. */
+export function gscNotice(
+  gsc: Pick<SeoGscStatus, "connected">,
+  summary: { mode?: string; impressions_28d: number },
+): "measured" | "pending" | "off" {
+  if (summary.mode !== "rank-tracking" && summary.impressions_28d > 0) return "measured";
+  return gsc.connected ? "pending" : "off";
+}
+
+/* ------------------------------------------------------- the Google return -- */
+
+export const GSC_STATE_PREFIX = "gsc.";
+export const GSC_CANCELLED = "Search Console wasn't connected — the Google sign-in was cancelled.";
+const GSC_GOOGLE_STOPPED = "Search Console wasn't connected — Google didn't finish the sign-in. Try again.";
+const GSC_NO_CODE = "Search Console wasn't connected — Google sent the browser back without a sign-in code. Try again.";
+const GSC_UNFINISHED = "Search Console wasn't connected — the connection couldn't be finished. Try again.";
+
+function base64UrlText(part: string): string | null {
+  try {
+    const b64 = part.replace(/-/g, "+").replace(/_/g, "/");
+    const bin = atob(b64 + "=".repeat((4 - (b64.length % 4)) % 4));
+    return new TextDecoder().decode(Uint8Array.from(bin, (c) => c.charCodeAt(0)));
+  } catch {
+    return null;
+  }
+}
+
+/** The brand a `gsc.<base64url JSON {b,u,t,n}>.<sig>` state names. Untrusted:
+ *  the signature is the backend's to check, so this is for navigation and
+ *  nothing else. Null for anything that does not decode to a sane id. */
+export function gscStateBrand(state: string | null | undefined): string | null {
+  if (!state || !state.startsWith(GSC_STATE_PREFIX)) return null;
+  const body = state.slice(GSC_STATE_PREFIX.length).split(".")[0];
+  if (!body) return null;
+  const text = base64UrlText(body);
+  if (!text) return null;
+  try {
+    const parsed: unknown = JSON.parse(text);
+    const b = parsed && typeof parsed === "object" ? (parsed as Record<string, unknown>).b : null;
+    // eslint-disable-next-line no-control-regex
+    return typeof b === "string" && b.length > 0 && b.length <= 200 && !/[\u0000-\u001f]/.test(b) ? b : null;
+  } catch {
+    return null;
+  }
+}
+
+export type GoogleReturn =
+  | { kind: "inbox" }
+  | { kind: "gsc"; code: string; state: string; brand: string | null }
+  | { kind: "gsc-refused"; brand: string | null; message: string };
+
+/** Which specialist a Google redirect belongs to, and what it carried. Inbox
+ *  Triage states start with a hex user id, never `gsc.`, so anything without
+ *  the prefix — including a bare `?error=` — is the inbox's, exactly as before. */
+export function googleReturn(search: string): GoogleReturn {
+  const q = new URLSearchParams(search);
+  const state = q.get("state") ?? "";
+  if (!state.startsWith(GSC_STATE_PREFIX)) return { kind: "inbox" };
+  const brand = gscStateBrand(state);
+  const error = q.get("error");
+  if (error !== null) {
+    return { kind: "gsc-refused", brand, message: error === "access_denied" ? GSC_CANCELLED : GSC_GOOGLE_STOPPED };
+  }
+  const code = q.get("code");
+  if (!code) return { kind: "gsc-refused", brand, message: GSC_NO_CODE };
+  return { kind: "gsc", code, state, brand };
+}
+
+/** Where the browser lands after the return: the brand's console, where the
+ *  Connect button was, with one flag for the workspace to say out loud. */
+export function gscReturnPath(brand: string | null, outcome: { connected: true } | { error: string }): string {
+  const route = brand ? `/#/w/seo/${encodeURIComponent(brand)}/console` : "/#/w/seo";
+  const flag = "error" in outcome ? `gsc=failed&why=${encodeURIComponent(outcome.error)}` : "gsc=connected";
+  return `${route}?${flag}`;
+}
+
+export interface GscReturnFlags {
+  connected: boolean;
+  error: string | null;
+}
+
+export const NO_GSC_RETURN: GscReturnFlags = { connected: false, error: null };
+
+/** The flag `gscReturnPath` left on the hash, read back by the workspace. */
+export function readGscReturn(hash: string): GscReturnFlags {
+  const i = hash.indexOf("?");
+  if (i < 0) return NO_GSC_RETURN;
+  const q = new URLSearchParams(hash.slice(i + 1));
+  const flag = q.get("gsc");
+  if (flag === "connected") return { connected: true, error: null };
+  if (flag === "failed") return { connected: false, error: str(q.get("why")) ?? GSC_UNFINISHED };
+  return NO_GSC_RETURN;
+}
+
+/** The sentence for a refused Search Console call. A coded refusal's message
+ *  is written for the reader and shown as-is; a timeout keeps its own words;
+ *  anything else — a 500, a dropped connection — gets one calm sentence rather
+ *  than "Request failed (500)". */
+export function gscFailure(e: unknown, fallback: string = GSC_UNFINISHED): string {
+  const code = apiCode(e);
+  if (code && code.startsWith("gsc_")) {
+    const detail = apiBody(e).detail;
+    const message = detail && typeof detail === "object" ? str((detail as Record<string, unknown>).message) : null;
+    return message ?? describeFailure(e, fallback);
+  }
+  if (apiStatus(e) === 404) return "That brand isn't in the SEO list any more.";
+  if (isTimeoutError(e)) return e.message;
+  return fallback;
+}
+
+export interface GoogleReturnIO {
+  completeGsc: (code: string, state: string) => Promise<{ brand_id?: unknown } | null | undefined>;
+  /** The Inbox Triage exchange, run exactly as it always was. */
+  inbox: () => void;
+  go: (path: string) => void;
+}
+
+/** The whole `/oauth/google` decision, with the side effects handed in so the
+ *  routing is provable without a browser. A Google refusal never reaches the
+ *  backend: there is no code to exchange. */
+export async function finishGoogleReturn(ret: GoogleReturn, io: GoogleReturnIO): Promise<void> {
+  if (ret.kind === "inbox") {
+    io.inbox();
+    return;
+  }
+  if (ret.kind === "gsc-refused") {
+    io.go(gscReturnPath(ret.brand, { error: ret.message }));
+    return;
+  }
+  try {
+    const res = await io.completeGsc(ret.code, ret.state);
+    io.go(gscReturnPath(str(res?.brand_id) ?? ret.brand, { connected: true }));
+  } catch (e) {
+    io.go(gscReturnPath(ret.brand, { error: gscFailure(e) }));
+  }
+}
+
+/* -------------------------------------------------------- degraded notes -- */
+
+/** What the brand's Search Console can do about a failed read. */
+export type GscRemedy = "connected" | "connectable" | "unavailable";
+
+export interface NoteContext {
+  site: string;
+  gsc: GscRemedy;
+}
+
+/** Notes the backend writes for people; they render word for word. */
+export const PLAIN_TOPIC_NOTES: readonly string[] = [
+  "Topics aren't checked against what you sell yet — run Analyze website.",
+  "Your site review lists no covered or missing topics, so the blog plan isn't checked against what you sell — re-run Analyze website.",
+];
+
+const GENERIC_NOTE = "Part of this analysis couldn't be completed — the figures shown are the ones that came back.";
+
+function searchConsoleNote(c: NoteContext): string {
+  if (c.gsc === "connected") {
+    return `Search Console is connected but couldn't be read for ${c.site} — the Google account that connected it may have lost access to the property.`;
+  }
+  if (c.gsc === "connectable") {
+    return `Search Console couldn't be read for ${c.site}. Press Connect Search Console and sign in with the Google account that has access to this site, then refresh the data.`;
+  }
+  return `Search Console couldn't be read for ${c.site}. ${GSC_CONNECT_UNAVAILABLE}`;
+}
+
+const RULES: readonly { prefix: string; say: (c: NoteContext) => string }[] = [
+  { prefix: "Search Console", say: searchConsoleNote },
+  { prefix: "Google Analytics", say: (c) => `Google Analytics isn't connected for ${c.site}. ${GA_SERVICE_ACCOUNT}` },
+  { prefix: "Page analytics", say: () => "Page-level analytics couldn't be read on this run, so some page figures may be missing." },
+  { prefix: "Rank tracking", say: () => "Live Google rank checks aren't available on this server right now, so positions weren't checked on this run." },
+  { prefix: "Serper", say: () => "Live Google checks aren't available on this server right now, so blog topics come from our own search data only." },
+  { prefix: "New-topic ideation", say: () => "AI topic ideas were skipped on this run. The rest of the blog plan is unaffected." },
+  { prefix: "Sitemap watch", say: () => "The competitor sitemap check couldn't run this time." },
+];
+
+/** True for text that reads like a machine wrote it: markup or a repr
+ *  (`<HttpError 403 …>`), braces, a URL, a traceback, an exception name, or a
+ *  `Label: detail` line — the shape every raw backend note takes. */
+export function looksRaw(note: string): boolean {
+  return /[<>{}[\]]|https?:\/\/|traceback|exception|error\b|\n/i.test(note)
+    || /^[A-Za-z][\w ./-]{0,40}:\s/.test(note);
+}
+
+/** One note as a sentence a busy owner can read. Never the exception. */
+export function plainNote(note: string, c: NoteContext): string {
+  const n = note.trim();
+  if (PLAIN_TOPIC_NOTES.includes(n)) return n;
+  const rule = RULES.find((r) => n.startsWith(r.prefix));
+  if (rule) return rule.say(c);
+  return looksRaw(n) ? GENERIC_NOTE : n;
+}
+
+/** Every note, plain and once each — two Serper failures are one sentence. */
+export function plainNotes(notes: readonly unknown[] | null | undefined, c: NoteContext): string[] {
+  const out: string[] = [];
+  for (const raw of notes ?? []) {
+    if (typeof raw !== "string" || !raw.trim()) continue;
+    const s = plainNote(raw, c);
+    if (!out.includes(s)) out.push(s);
+  }
+  return out;
+}
+
+/* ---------------------------------------------------- topic provenance -- */
+
+const SOURCES: Record<string, { key: string; label: string }> = {
+  "seed": { key: "seed", label: "Your seed" },
+  "site gap": { key: "gap", label: "Site gap" },
+  "suggested seed": { key: "suggested", label: "Suggested by site review" },
+  "google suggestion": { key: "google", label: "Google suggestion" },
+  "search data": { key: "search", label: "Search data" },
+  "new idea": { key: "idea", label: "AI idea" },
+  "competitor-content": { key: "competitor", label: "Competitor" },
+};
+
+export interface TopicOrigin {
+  /** CSS modifier: `seo-chip--src-<key>`. */
+  key: string;
+  label: string;
+  /** "from: <seed>" — Google suggestions only. */
+  fromSeed: string | null;
+}
+
+/** Where a blog topic came from. An unknown or missing source renders as a
+ *  neutral "Other source" chip, never as the raw value. */
+export function topicOrigin(t: Partial<Pick<SeoTopic, "source" | "from_seed">>): TopicOrigin {
+  const source = typeof t.source === "string" ? t.source : "";
+  const known = SOURCES[source];
+  return {
+    key: known?.key ?? "other",
+    label: known?.label ?? "Other source",
+    fromSeed: source === "google suggestion" ? str(t.from_seed) : null,
+  };
+}

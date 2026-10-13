@@ -52,25 +52,63 @@ export function setUnauthorizedHandler(fn: () => void): void {
  *  thing that string could not carry: a *refusal* (the backend saying "valid
  *  request, but no — here is why") and a *failure* (something broke) look
  *  identical as prose, and telling them apart by matching on that prose is how
- *  a reworded sentence silently turns one into the other. */
+ *  a reworded sentence silently turns one into the other.
+ *
+ *  One contract for every reader. A coded reply comes in two shapes —
+ *  `{"detail": {code, message, ...facts}}` (FastAPI's `HTTPException` with an
+ *  object detail: the upload routes, Search Console) and a top-level
+ *  `{code, detail, ...}` — and both land on the same fields: `code` (top level
+ *  first, then inside `detail`), `detail` as sent, the whole `body`, and
+ *  `retryAfterS`. Whatever facts are passed, the rest are read from them, so
+ *  the fields never disagree however the error was built. `directUpload.ts`
+ *  reads `code` / `detail` / `retryAfterS` structurally; screens read
+ *  `apiCode` / `apiBody`. */
+export interface ApiErrorFacts {
+  /** The reply's JSON object, when it sent one. */
+  body?: Readonly<Record<string, unknown>> | null;
+  /** The reply's `detail` as sent; read from `body` when not given. */
+  detail?: unknown;
+  /** The reply's stable code; read from `body.code`, then `detail.code`, when
+   *  not given. */
+  code?: string | null;
+  /** Seconds from `Retry-After`; `detail.retry_after` when not given. */
+  retryAfterS?: number | null;
+}
+
+/** An object, or null for a string, a list, or nothing. */
+const asRecord = (v: unknown): Record<string, unknown> | null =>
+  v && typeof v === "object" && !Array.isArray(v) ? v as Record<string, unknown> : null;
+
 export class ApiError extends Error {
-  /** The backend's stable `detail.code`, when its `detail` was an object. */
+  /** The reply's stable code — a top-level `code`, else `detail.code`. Null
+   *  for a route that sends none, or a backend older than the code. */
   readonly code: string | null;
   /** The reply's `detail` as sent — the facts beside a code (`accepted`,
    *  `width`, `limit_bytes`, …). Undefined when the reply had none. */
   readonly detail: unknown;
+  /** The reply's JSON object, when it sent one. Routes that answer
+   *  `{code, reason, detail, ...}` put what a screen branches on here, so a
+   *  state is chosen by its code and never by matching the wording. Built
+   *  from `detail` alone, it is `{detail}`. */
+  readonly body: Readonly<Record<string, unknown>> | null;
   /** Seconds from `Retry-After` (or `detail.retry_after`), when given. */
   readonly retryAfterS: number | null;
   constructor(
     message: string,
     readonly status: number,
-    extra: { code?: string | null; detail?: unknown; retryAfterS?: number | null } = {},
+    facts: ApiErrorFacts | null = {},
   ) {
     super(message);
     this.name = "ApiError";
-    this.code = extra.code ?? null;
-    this.detail = extra.detail;
-    this.retryAfterS = extra.retryAfterS ?? null;
+    const f = facts ?? {};
+    this.detail = f.detail !== undefined ? f.detail : f.body?.detail;
+    this.body = f.body ?? (this.detail !== undefined ? { detail: this.detail } : null);
+    const inner = asRecord(this.detail);
+    const top = this.body?.code;
+    this.code = f.code
+      ?? (typeof top === "string" ? top : typeof inner?.code === "string" ? inner.code : null);
+    this.retryAfterS = f.retryAfterS
+      ?? (typeof inner?.retry_after === "number" ? inner.retry_after : null);
   }
 }
 
@@ -79,25 +117,42 @@ export class ApiError extends Error {
 export const apiStatus = (e: unknown): number | null =>
   e instanceof ApiError ? e.status : null;
 
-/** The sentence in a `detail`: FastAPI's plain string, or the `message` of the
- *  `{code, message}` object the upload routes answer with. A list (pydantic's
+/** The `code` a coded error reply carried, or null — a route that sends none,
+ *  a backend older than the code, or no reply at all. Read at the top level
+ *  (`{code, detail}`) first, then inside an object `detail`. */
+export const apiCode = (e: unknown): string | null =>
+  e instanceof ApiError ? e.code : null;
+
+/** The rest of a coded error reply (`billed`, `unsupported`, `errors`…), or an
+ *  empty object. Every field read from it needs its own default. */
+export const apiBody = (e: unknown): Readonly<Record<string, unknown>> =>
+  (e instanceof ApiError && e.body) || {};
+
+/** The sentence in a reply: FastAPI's plain string `detail`, or the `message`
+ *  of an object `detail` — a coded refusal's message is written for the
+ *  reader, same as a string `detail`. A blank message, a list (pydantic's
  *  validation errors) or an object without one has no sentence to show. */
-function detailMessage(detail: unknown): string | null {
+function replyMessage(body: Readonly<Record<string, unknown>> | null): string | null {
+  const detail = body?.detail;
   if (typeof detail === "string") return detail;
-  if (typeof detail === "object" && detail !== null && !Array.isArray(detail)) {
-    const message = (detail as { message?: unknown }).message;
-    if (typeof message === "string") return message;
+  const message = asRecord(detail)?.message;
+  return typeof message === "string" && message.trim() ? message : null;
+}
+
+/** A non-2xx reply's sentence and JSON body. A reply with no JSON body never
+ *  came from the backend — an edge in front of it answered — so all it has to
+ *  say is its status. */
+async function readErrorReply(response: Response): Promise<{ message: string; body: Record<string, unknown> | null }> {
+  try {
+    const body = asRecord(await response.json());
+    return { message: replyMessage(body) ?? "Request failed", body };
+  } catch {
+    return { message: `Request failed (${response.status})`, body: null };
   }
-  return null;
 }
 
 async function parseError(response: Response): Promise<string> {
-  try {
-    const data = await response.json();
-    return detailMessage(data?.detail) ?? "Request failed";
-  } catch {
-    return `Request failed (${response.status})`;
-  }
+  return (await readErrorReply(response)).message;
 }
 
 /** `Retry-After` in seconds — the delta form; an HTTP date is not used here. */
@@ -106,27 +161,14 @@ const retryAfterSeconds = (raw: string | null | undefined): number | null => {
   return Number(raw.trim());
 };
 
-/** A non-2xx reply as an `ApiError` that keeps the structured `detail`, its
- *  code and `Retry-After` — the upload rules (`directUpload.ts`) decide on
- *  those, never on the prose. The header can be unreadable cross-origin, so
- *  `detail.retry_after` is the fallback for it. */
+/** A non-2xx reply as an `ApiError` that keeps its JSON body, the structured
+ *  `detail`, its code and `Retry-After` — the upload rules (`directUpload.ts`)
+ *  and the SEO screens decide on those, never on the prose. The header can be
+ *  unreadable cross-origin, so `detail.retry_after` is the fallback for it. */
 async function apiErrorFrom(response: Response): Promise<ApiError> {
-  let detail: unknown;
-  let message = `Request failed (${response.status})`;
-  try {
-    const data = await response.json();
-    detail = data?.detail;
-    message = detailMessage(detail) ?? "Request failed";
-  } catch {
-    /* no JSON body: an edge in front of the backend answered */
-  }
-  const d = typeof detail === "object" && detail !== null && !Array.isArray(detail)
-    ? (detail as { code?: unknown; retry_after?: unknown })
-    : null;
-  const code = typeof d?.code === "string" ? d.code : null;
-  const fromBody = typeof d?.retry_after === "number" ? d.retry_after : null;
-  const retryAfterS = retryAfterSeconds(response.headers?.get("Retry-After")) ?? fromBody;
-  return new ApiError(message, response.status, { code, detail, retryAfterS });
+  const { message, body } = await readErrorReply(response);
+  const retryAfterS = retryAfterSeconds(response.headers?.get("Retry-After"));
+  return new ApiError(message, response.status, { body, retryAfterS });
 }
 
 /** The single choke point for every call in this file, so the deadline and the
@@ -272,7 +314,7 @@ async function fetchBlob(
   // own "Not Found", and a caller that can read the status can say that in
   // words instead of printing two vague ones. Still an `Error`, so the call
   // sites that only read `.message` are untouched.
-  if (!response.ok) throw new ApiError(await parseError(response), response.status);
+  if (!response.ok) throw await apiErrorFrom(response);
   return response.blob();
 }
 
@@ -1397,7 +1439,7 @@ export function gdUploadBrandReferences(
 async function deleteNoContent(path: string, opts?: RequestOptions): Promise<void> {
   const { response, deadline } = await send(path, { method: "DELETE" }, opts ?? {});
   try {
-    if (!response.ok) throw new ApiError(await parseError(response), response.status);
+    if (!response.ok) throw await apiErrorFrom(response);
   } finally {
     deadline.clear();
   }
@@ -2657,6 +2699,9 @@ export interface SeoRunNums {
 export interface SeoBrandCard {
   brand: SeoBrand;
   gsc_connected?: boolean;
+  /** The brand's Search Console truth — absent on a backend older than the
+   *  console relay, where `gsc_connected` is all there is. */
+  gsc?: SeoGscStatus;
   headline?: string | null;
   last_run: {
     at: string;
@@ -2668,7 +2713,14 @@ export interface SeoBrandCard {
 }
 
 export interface SeoOverview {
-  sources: { gsc: boolean; serp: boolean };
+  sources: {
+    /** True only when some brand really has Search Console behind it. */
+    gsc: boolean;
+    /** Whether the Connect button can work on this server. Absent on an older
+     *  backend, where the connect flow could not finish — read as false. */
+    gsc_connect?: boolean;
+    serp: boolean;
+  };
   brands: SeoBrandCard[];
 }
 
@@ -2706,6 +2758,9 @@ export interface SeoTopic {
   avoided?: boolean;
   /** Why this topic was avoided, e.g. "overlaps https://example.com/page" — null/absent when not avoided. */
   avoided_reason?: string | null;
+  /** For a Google suggestion, the seed it was suggested for — absent on runs
+   *  that predate it. */
+  from_seed?: string | null;
 }
 
 export interface SeoGaTotals {
@@ -2746,6 +2801,13 @@ export const seoOverview = (opts?: RequestOptions) =>
 export interface SeoGscStatus {
   connected: boolean;
   property: string | null;
+  /** Who connected it and when — absent on a backend older than the relay. */
+  connected_by?: string | null;
+  connected_at?: string | null;
+  /** The property set for the shared service account, when one is. */
+  service_account_property?: string | null;
+  /** The latest run's summary is in Search Console mode. */
+  reading?: boolean;
 }
 
 export interface SeoSiteIssue {
@@ -2789,6 +2851,15 @@ export const seoAnalyzeSite = (brandId: string) =>
 
 export const seoOauthStart = (brandId: string) =>
   getJson<{ url: string }>(`/api/seo-geo/oauth/start/${brandId}`);
+
+/** Finish the Search Console connect with what Google sent back to
+ *  `/oauth/google`. The bearer ties the grant to this member; the state names
+ *  the brand. Refusals are coded under `detail` (`gsc_state_*` 400,
+ *  `gsc_scope_not_granted` / `gsc_no_property` 422, `gsc_exchange_failed` /
+ *  `gsc_google_unavailable` 502, `gsc_oauth_unconfigured` / `gsc_offline` 503)
+ *  with a `message` written for the reader. */
+export const seoOauthComplete = (code: string, state: string) =>
+  postJson<{ brand_id: string; gsc: SeoGscStatus }>("/api/seo-geo/oauth/complete", { code, state });
 
 export const seoOauthDisconnect = (brandId: string) =>
   postJson<{ connected: boolean }>(`/api/seo-geo/oauth/disconnect/${brandId}`, {});

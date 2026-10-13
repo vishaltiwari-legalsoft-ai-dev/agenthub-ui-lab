@@ -12,6 +12,7 @@ import { useAuth } from "@/lib/auth";
 import { Icon } from "@/lib/kit-ui";
 import { describeFailure, useLoadSession } from "@/lib/load";
 import { AskView, AuditView, BriefsView, CompetitorsView, KeywordsView, UpdatePlanButton } from "./labs";
+import { gscFailure, gscSlot, plainNotes, readGsc, topicOrigin, type NoteContext } from "./seo";
 
 type SeoTool = "ask" | "keywords" | "briefs" | "audit";
 
@@ -58,17 +59,11 @@ function DifficultyChip({ difficulty }: { difficulty: string | null }) {
   return <span className={`seo-chip seo-chip--diff-${cls}`}>{difficulty}</span>;
 }
 
-function DegradedNotes({ notes, domain }: { notes: string[]; domain: string }) {
-  if (!notes.length) return null;
-  const friendly = notes.map((n) =>
-    n.startsWith("Search Console")
-      ? `Search Console access is missing for ${domain} — share the property with the backend service account, then refresh.`
-      : n.startsWith("Serper")
-        ? "Serper key is not set — blog topics are limited to our own search data (no live Google checks)."
-        : n.startsWith("Google Analytics")
-          ? `Google Analytics is not connected for ${domain} — give the backend service account Viewer access to the GA4 property, then refresh.`
-          : n,
-  );
+/** What this run could not reach, as plain sentences — never the exception
+ *  text the backend recorded (`seo.ts`, `plainNotes`). */
+function DegradedNotes({ notes, ctx }: { notes: readonly unknown[]; ctx: NoteContext }) {
+  const friendly = plainNotes(notes, ctx);
+  if (!friendly.length) return null;
   return (
     <div className="seo-degraded">
       <Icon name="alert-triangle" size={14} />
@@ -77,8 +72,8 @@ function DegradedNotes({ notes, domain }: { notes: string[]; domain: string }) {
   );
 }
 
-function PagesView({ doc, busy, error, onRefresh }: {
-  doc: SeoPagesDoc | null; busy: boolean; error: string | null; onRefresh: () => void;
+function PagesView({ doc, busy, error, onRefresh, noteCtx }: {
+  doc: SeoPagesDoc | null; busy: boolean; error: string | null; onRefresh: () => void; noteCtx: NoteContext;
 }) {
   if (!doc) {
     return (
@@ -111,12 +106,8 @@ function PagesView({ doc, busy, error, onRefresh }: {
           <Icon name="refresh-cw" size={13} /> Refresh
         </button>
       </div>
-      {doc.notes.length > 0 && (
-        <div className="seo-degraded">
-          <Icon name="alert-triangle" size={14} />
-          <div>{doc.notes.map((n, i) => <div key={i}>{n}</div>)}</div>
-        </div>
-      )}
+      {/* the pages doc forwards the run's Search Console / Analytics failures */}
+      <DegradedNotes notes={doc.notes} ctx={noteCtx} />
       {doc.pages.length === 0 && (
         <div className="seo-empty">No pages found — run the site analysis, then refresh this tab.</div>
       )}
@@ -357,7 +348,13 @@ function AddBrandForm({ onSaved, onToast }: { onSaved: () => void; onToast: Toas
   );
 }
 
-export function SeoAgent({ onToast, onBack }: { onToast: ToastFn; onBack: () => void }) {
+export function SeoAgent({ onToast, onBack, focusBrand }: {
+  onToast: ToastFn;
+  onBack: () => void;
+  /** A brand to open on arrival — set by the workspace when Google sends the
+   *  reader back from Connect Search Console, so they land where they left. */
+  focusBrand?: string;
+}) {
   const { user } = useAuth();
   const [overview, setOverview] = useState<SeoOverview | null>(null);
   const [brand, setBrand] = useState<SeoBrand | null>(null);
@@ -375,6 +372,8 @@ export function SeoAgent({ onToast, onBack }: { onToast: ToastFn; onBack: () => 
   const [busy, setBusy] = useState(false);
   const [showAllTodos, setShowAllTodos] = useState(false);
   const [showAvoided, setShowAvoided] = useState(false);
+  /** Set from the click until the browser leaves for Google. */
+  const [connecting, setConnecting] = useState(false);
 
   const session = useLoadSession();
 
@@ -505,13 +504,24 @@ export function SeoAgent({ onToast, onBack }: { onToast: ToastFn; onBack: () => 
     }
   }
 
+  // Opened on arrival from the Google return. Keyed on the id, so clearing it
+  // (or the reader going back to the brand list) never re-opens anything.
+  useEffect(() => {
+    if (focusBrand) void openBrand(focusBrand);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [focusBrand]);
+
+  /** Same tab, not a popup: `window.open` after an `await` is no longer a
+   *  user gesture, and Safari's blocker ate it. Google returns to
+   *  `/oauth/google`, which brings the reader back to this brand. */
   async function connectGsc(id: string) {
+    setConnecting(true);
     try {
       const { url } = await seoOauthStart(id);
-      window.open(url, "_blank", "width=540,height=680");
-      onToast("Choose the Google account that owns the site's Search Console, press Allow, then hit Refresh data here.");
+      window.location.assign(url);
     } catch (e) {
-      onToast(describeFailure(e, "Could not start the Google connect"), "error");
+      onToast(gscFailure(e, "Couldn't start the Google sign-in — try again."), "error");
+      setConnecting(false);
     }
   }
 
@@ -521,6 +531,7 @@ export function SeoAgent({ onToast, onBack }: { onToast: ToastFn; onBack: () => 
       await seoOauthDisconnect(id);
       setGsc({ connected: false, property: null });
       onToast("Search Console disconnected");
+      await refreshOverview();
     } catch (e) {
       onToast(describeFailure(e, "Disconnect failed"), "error");
     }
@@ -549,6 +560,12 @@ export function SeoAgent({ onToast, onBack }: { onToast: ToastFn; onBack: () => 
   }
 
   const sources = overview?.sources;
+  const gscView = readGsc(gsc);
+  const slot = gscSlot(gscView, sources);
+  const noteCtx: NoteContext = {
+    site: brand?.domain ?? "this site",
+    gsc: gscView.connected ? "connected" : slot.mode === "connect" ? "connectable" : "unavailable",
+  };
 
   return (
     <div className="mr-app seo-app">
@@ -576,7 +593,7 @@ export function SeoAgent({ onToast, onBack }: { onToast: ToastFn; onBack: () => 
               <span className="mr-panel__sub">Every site we watch — open one for its fix list and blog topics.</span>
             </div>
             <div className="seo-grid">
-              {(overview?.brands ?? []).map(({ brand: b, last_run, gsc_connected, headline }) => (
+              {(overview?.brands ?? []).map(({ brand: b, last_run, gsc_connected, gsc: gscCard, headline }) => (
                 <div key={b.id} className="seo-card" role="button" tabIndex={0}
                      aria-busy={opening === b.id}
                      onClick={() => void openBrand(b.id)}
@@ -584,7 +601,9 @@ export function SeoAgent({ onToast, onBack }: { onToast: ToastFn; onBack: () => 
                   <div className="seo-card__head">
                     <span className="seo-card__name">
                       {b.name}
-                      {gsc_connected && <span className="seo-chip seo-chip--on seo-card__gsc">GSC ✓</span>}
+                      {readGsc(gscCard, gsc_connected).connected && (
+                        <span className="seo-chip seo-chip--on seo-card__gsc">GSC ✓</span>
+                      )}
                       {opening === b.id && <span className="seo-chip">Opening…</span>}
                     </span>
                     <span className="seo-card__domain">{b.domain}</span>
@@ -653,17 +672,19 @@ export function SeoAgent({ onToast, onBack }: { onToast: ToastFn; onBack: () => 
                 <span className="mr-panel__sub">{brand.domain}{run ? ` · analyzed ${run.at}` : ""}</span>
               </div>
               <div className="seo-detail__actions">
-                {gsc?.connected ? (
-                  <span className="seo-chip seo-chip--on" title={gsc.property ?? undefined}>
+                {slot.mode === "connected" && (
+                  <span className="seo-chip seo-chip--on" title={gscView.property ?? undefined}>
                     Search Console ✓
                     {user?.is_creator && (
                       <button className="seo-chip__x" aria-label="Disconnect Search Console"
                               onClick={() => void disconnectGsc(brand.id)}>×</button>
                     )}
                   </span>
-                ) : (
-                  <button className="seo-btn" onClick={() => void connectGsc(brand.id)}>
-                    <Icon name="link" size={13} /> Connect Search Console
+                )}
+                {slot.mode === "connect" && (
+                  <button className="seo-btn" disabled={connecting} aria-describedby="seo-gsc-line"
+                          onClick={() => void connectGsc(brand.id)}>
+                    <Icon name="link" size={13} /> {connecting ? "Opening Google…" : "Connect Search Console"}
                   </button>
                 )}
                 <button className="seo-btn" disabled={siteBusy} onClick={() => void analyzeSite(brand.id)}>
@@ -677,6 +698,8 @@ export function SeoAgent({ onToast, onBack }: { onToast: ToastFn; onBack: () => 
                 )}
               </div>
             </div>
+
+            {slot.line && <p id="seo-gsc-line" className="seo-gsc">{slot.line}</p>}
 
             <Story run={run} />
 
@@ -695,7 +718,7 @@ export function SeoAgent({ onToast, onBack }: { onToast: ToastFn; onBack: () => 
               </div>
             )}
 
-            {run && <DegradedNotes notes={run.degraded} domain={brand.domain} />}
+            {run && <DegradedNotes notes={run.degraded} ctx={noteCtx} />}
 
             {siteReview && (
               <Fold title="Website health"
@@ -823,7 +846,7 @@ export function SeoAgent({ onToast, onBack }: { onToast: ToastFn; onBack: () => 
             )}
 
             <Fold title="Pages" count={pagesDoc?.pages.length} hint="traffic + health, page by page">
-              <PagesView doc={pagesDoc} busy={pagesBusy} error={pagesError}
+              <PagesView doc={pagesDoc} busy={pagesBusy} error={pagesError} noteCtx={noteCtx}
                 onRefresh={() => void refreshPages(brand.id)} />
             </Fold>
 
@@ -908,16 +931,19 @@ export function SeoAgent({ onToast, onBack }: { onToast: ToastFn; onBack: () => 
                       {liveTopics.length === 0 && avoidedTopics.length === 0 && (
                         <div className="seo-empty">No topics yet — add seed keywords to this brand and refresh.</div>
                       )}
-                      {liveTopics.map((t, i) => (
+                      {liveTopics.map((t, i) => {
+                        const origin = topicOrigin(t);
+                        return (
                         <div key={t.keyword} className="seo-topic">
                           <div className="seo-topic__main">
                             <span className="seo-topic__kw"><span className="seo-topic__num">{i + 1}</span> {t.keyword}</span>
                             <div className="seo-topic__chips">
+                              <span className={`seo-chip seo-chip--src seo-chip--src-${origin.key}`}>{origin.label}</span>
+                              {origin.fromSeed && <span className="seo-topic__from">from: {origin.fromSeed}</span>}
                               <span className={`seo-chip seo-chip--tier-${t.priority === "high" ? "high" : t.priority === "medium" ? "medium" : "watch"}`}>
                                 {t.priority} priority
                               </span>
-                              {t.source === "new idea" && <span className="seo-chip seo-chip--trend-new">new idea</span>}
-                              <span className="seo-chip">{t.angle}</span>
+                              {t.angle && <span className="seo-chip">{t.angle}</span>}
                               {t.intent && <span className="seo-chip">{t.intent}</span>}
                               <TrendChip trend={t.trend} />
                               <DifficultyChip difficulty={t.difficulty} />
@@ -932,7 +958,8 @@ export function SeoAgent({ onToast, onBack }: { onToast: ToastFn; onBack: () => 
                             )}
                           </div>
                         </div>
-                      ))}
+                        );
+                      })}
                       {avoidedTopics.length > 0 && (
                         <div className="seo-avoided">
                           <button className="seo-btn seo-avoided__toggle" onClick={() => setShowAvoided((v) => !v)}>

@@ -29,6 +29,7 @@ import {
 } from "@/lib/api";
 import { loadPending, useLoadSession, type Load } from "@/lib/load";
 import { isLive } from "@/components/console/geo/provenance";
+import { gscIntegration } from "@/components/console/seo/seo";
 import { useHeadline, useHub } from "../context";
 import { n, word } from "../model";
 import { Oops, PageHead, RuleHead, Wait } from "../ui";
@@ -89,6 +90,10 @@ export function IntegrationsView() {
   });
 
   if (seo.data) {
+    // Connected only on the backend's word that some brand really has Search
+    // Console behind it — a configured server is not a connected brand.
+    const gsc = gscIntegration(seo.data.sources);
+    const gscSection = gsc.open;
     hooks.push({
       key: "gsc",
       glyph: "GS",
@@ -96,8 +101,9 @@ export function IntegrationsView() {
       what: "Real impressions, clicks and positions for every page and query. Without it the SEO Analyst measures live ranks only, which is a much thinner picture.",
       usedByLabel: "Read by",
       usedBy: "SEO Analyst",
-      status: seo.data.sources.gsc ? "on" : "off",
-      open: () => openWork("seo", "", "health"),
+      status: gsc.status,
+      note: gsc.note,
+      open: gscSection ? () => openWork("seo", "", gscSection) : undefined,
     });
     hooks.push({
       key: "serp",

@@ -21,6 +21,7 @@
 import { useEffect, useState } from "react";
 import { seoBrandDetail, type SeoBrandCard, type SeoRun, type SeoTodo } from "@/lib/api";
 import { loadPending, useLoadSession, type Load } from "@/lib/load";
+import { GSC_CONNECT_UNAVAILABLE, gscNotice, plainNotes, readGsc } from "@/components/console/seo/seo";
 import { useHub } from "../../context";
 import { n } from "../../model";
 import { Blank, Oops, Wait } from "../../ui";
@@ -205,7 +206,12 @@ function OppBars({ todos }: { todos: SeoTodo[] }) {
 
 /* -------------------------------------------------------------- the page -- */
 
-export function SeoDashboard({ card }: { card: SeoBrandCard }) {
+export function SeoDashboard({ card, connectReady }: {
+  card: SeoBrandCard;
+  /** `sources.gsc_connect`: whether the console's Connect button works on
+   *  this server. Without it, the notice offers no way in that leads nowhere. */
+  connectReady: boolean;
+}) {
   const { openWork, revision } = useHub();
   const session = useLoadSession();
   const [detail, setDetail] = useState<Load<{ run: SeoRun | null }>>(loadPending);
@@ -244,23 +250,46 @@ export function SeoDashboard({ card }: { card: SeoBrandCard }) {
   const deltaPct = s.clicks_prev_28d ? Math.round((delta / s.clicks_prev_28d) * 100) : null;
   const score = has.position ? healthScore(run) : null;
   const openFixes = run.todos.filter((t) => t.status !== "done").length;
-  const gscOff = card.gsc_connected === false || s.mode === "rank-tracking";
+  const gsc = readGsc(card.gsc, card.gsc_connected);
+  const notice = gscNotice(gsc, s);
+  // With the "not connected" line up, the run's own Search Console note would
+  // say the same thing twice and point at a button this page does not have.
+  const notes = plainNotes(notice === "off"
+    ? run.degraded.filter((d) => !(typeof d === "string" && d.startsWith("Search Console")))
+    : run.degraded, {
+    site: card.brand.domain || "this site",
+    gsc: gsc.connected ? "connected" : connectReady ? "connectable" : "unavailable",
+  });
 
   return (
     <div className="sdb">
-      {/* what this run could not measure, in the backend's own words */}
-      {(gscOff || run.degraded.length > 0) && (
+      {/* what this run could not measure — in plain sentences, never the
+          exception text the run recorded */}
+      {(notice !== "measured" || notes.length > 0) && (
         <div className="sdb-notice" role="status">
-          {gscOff && (
+          {notice === "off" && (
             <p>
               <b>Search Console is not connected</b> — positions come from live rank tracking only;
               clicks and impressions are not measured for this brand.
+              {connectReady ? (
+                <button type="button" className="sdb-link" onClick={() => openWork("seo", brandId, "console")}>
+                  Connect it in the console
+                </button>
+              ) : (
+                <> {GSC_CONNECT_UNAVAILABLE}</>
+              )}
+            </p>
+          )}
+          {notice === "pending" && (
+            <p>
+              <b>Search Console is connected</b> — these figures don&apos;t include it yet. Refresh the
+              data in the console to pull clicks and impressions.
               <button type="button" className="sdb-link" onClick={() => openWork("seo", brandId, "console")}>
-                Connect it in the console
+                Open the console
               </button>
             </p>
           )}
-          {run.degraded.map((d) => <p key={d}>{d}</p>)}
+          {notes.map((d) => <p key={d}>{d}</p>)}
         </div>
       )}
 

@@ -213,6 +213,19 @@ describe("routeFromHash with a query on the hash", () => {
     expect(canOpenWorkspace("inbox", SCOPED)).toBe(false);
     expect(canOpenWorkspace("inbox", MEMBER)).toBe(true);
   });
+
+  // The Search Console return lands on the brand's console with a flag the
+  // SEO workspace reads (`components/console/seo/seo.ts`, `readGscReturn`).
+  it("routes the Search Console return to the brand's console", () => {
+    expect(routeFromHash("#/w/seo/berry-virtual/console?gsc=connected", MEMBER)).toEqual({
+      panel: "agents",
+      work: { slug: "seo", subject: "berry-virtual", section: "console" },
+    });
+    expect(routeFromHash("#/w/seo?gsc=failed&why=x", MEMBER)).toEqual({
+      panel: "agents",
+      work: { slug: "seo", subject: "", section: "" },
+    });
+  });
 });
 
 /* ----------------------------------------------------- Home: usage blocks -- */
