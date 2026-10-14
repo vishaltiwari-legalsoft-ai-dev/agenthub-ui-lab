@@ -515,3 +515,12 @@ a.seo-pages__path:hover { color: var(--green-500); }
 .seo-todo__pages a { color: inherit; }
 /* A typed seed that overlaps an existing page. */
 .seo-topic__refresh { justify-self: start; font: 600 12px/1.3 var(--font-sans); color: var(--text-primary); text-underline-offset: 2px; }
+
+/* Round 3 -------------------------------------------------------------------
+   "+N more" under an audit finding's page list; the blog-plan topic an "In
+   your blog plan as #n" pointer just opened (the same calm highlight as a
+   Fix-list jump). */
+.seo-brief__more { color: var(--text-tertiary); }
+.seo-topic--focus { border-color: var(--green-500); background: color-mix(in srgb, var(--green-500) 6%, transparent); }
+.seo-topic:focus { outline: none; }
+.seo-topic:focus-visible { outline: 2px solid var(--text-primary); outline-offset: 2px; }

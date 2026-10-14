@@ -70,7 +70,19 @@ export const loadMessage = (e: unknown, fallback: string): string =>
  *  the job may still be finishing on the backend, and tells the user to try
  *  again. Every hand-rolled site replaced that with "Failed to load". */
 export const describeFailure = (e: unknown, fallback: string): string =>
-  isTimeoutError(e) ? e.message : loadMessage(e, fallback);
+  isTimeoutError(e) ? e.message : isNetworkFailure(e) ? OFFLINE_MESSAGE : loadMessage(e, fallback);
+
+/** What to say when the request never reached the server. */
+export const OFFLINE_MESSAGE = "Couldn't reach the server — check your connection and try again.";
+
+/** Each browser words a dropped connection its own way — Chrome "Failed to
+ *  fetch", Firefox "NetworkError when attempting to fetch resource.", Safari
+ *  "Load failed" — and `fetch` rejects with a TypeError carrying it. Only that
+ *  exact pair counts: a TypeError from a bug keeps its own message, and a
+ *  backend refusal is an ApiError, never this. */
+const NETWORK_WORDS = /^(failed to fetch|networkerror when attempting to fetch resource\.?|load failed|network request failed|the network connection was lost\.?)$/i;
+export const isNetworkFailure = (e: unknown): boolean =>
+  e instanceof TypeError && NETWORK_WORDS.test(e.message.trim());
 
 /** `keepStale` is for unattended refreshes only: numbers already on screen
  *  really were received, so a missed 3-minute poll should leave them alone

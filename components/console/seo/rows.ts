@@ -10,12 +10,12 @@
 
 import { createElement as h, Fragment, type ReactNode } from "react";
 import type {
-  SeoAuditIssue, SeoBrief, SeoPageIntel, SeoPagesDoc, SeoPagesGrounding, SeoPlanItem, SeoReviewGrounding, SeoTodo,
-  SeoTopic,
+  SeoAuditIssue, SeoBrief, SeoPageIntel, SeoPagesDoc, SeoPagesGrounding, SeoPlanItem, SeoReviewGrounding,
+  SeoSiteReview, SeoTodo, SeoTopic,
 } from "@/lib/api";
 import {
-  auditEvidence, auditTone, briefSchema, hiddenSuggestionsLine, movedFixLinks, pageChips, pageRec, planHeading,
-  planItemView, refreshHref, reviewDropped, todoPages, topicAngle, topicOrigin,
+  auditEvidence, auditTone, briefSchema, hiddenSuggestionsLine, missingTopics, morePagesLine, movedFixLinks, pageChips,
+  pageRec, planHeading, planItemView, refreshHref, reviewDropped, todoPages, topicAngle, topicDifficulty, topicOrigin,
 } from "./seo";
 
 /** Jump to a Fix-list item by its to-do id: opens the list, scrolls to it. */
@@ -99,6 +99,8 @@ export function AuditIssueRow({ issue }: { issue: SeoAuditIssue }): ReactNode {
       ev.lines.map((l) => h("div", { key: l, className: "seo-brief__line" }, l)),
     ),
     !ev?.coversPages && pages.map((p) => h("div", { key: p, className: "seo-brief__line" }, p)),
+    // the backend lists at most 15 of the pages it counts
+    morePagesLine(issue) && h("div", { className: "seo-brief__line seo-brief__more" }, morePagesLine(issue)),
   );
 }
 
@@ -169,22 +171,25 @@ function TrendChip({ trend }: { trend: unknown }): ReactNode {
   return label ? h("span", { className: `seo-chip seo-chip--trend-${trend}` }, label) : null;
 }
 
-function DifficultyChip({ difficulty }: { difficulty: string | null }): ReactNode {
-  if (!difficulty) return h("span", { className: "seo-chip" }, "—");
-  const cls = difficulty === "easy win" ? "easy" : difficulty === "medium" ? "medium" : "hard";
-  return h("span", { className: `seo-chip seo-chip--diff-${cls}` }, difficulty);
+/** "we rank #2" for a typed seed already in the top 3 — calm, in place of a
+ *  red "hard" — otherwise the difficulty as before. */
+function DifficultyChip({ t }: { t: SeoTopic }): ReactNode {
+  const d = topicDifficulty(t);
+  const cls = d.tone === "rank" ? " seo-chip--on" : d.tone === "none" ? "" : ` seo-chip--diff-${d.tone}`;
+  return h("span", { className: `seo-chip${cls}` }, d.label);
 }
 
 /** One blog topic: where it came from, its chips, the why, and — only when
  *  there is one — a page to refresh instead and its impact line. A topic that
  *  is also a Fix-list item says so in its why; there is no second chip. */
-export function TopicRow({ t, index }: { t: SeoTopic; index: number }): ReactNode {
+export function TopicRow({ t, index, focused = false }: { t: SeoTopic; index: number; focused?: boolean }): ReactNode {
   const origin = topicOrigin(t);
   const angle = topicAngle(t.angle);
   const refresh = refreshHref(t.refresh_url);
   const impact = typeof t.impact === "string" && t.impact.trim() ? t.impact : null;
   const tier = t.priority === "high" ? "high" : t.priority === "medium" ? "medium" : "watch";
-  return h("div", { className: "seo-topic" },
+  // an anchor for "In your blog plan as #n"
+  return h("div", { id: `seo-topic-${index}`, tabIndex: -1, className: `seo-topic${focused ? " seo-topic--focus" : ""}` },
     h("div", { className: "seo-topic__main" },
       h("span", { className: "seo-topic__kw" }, h("span", { className: "seo-topic__num" }, index), " ", t.keyword),
       h("div", { className: "seo-topic__chips" },
@@ -194,7 +199,7 @@ export function TopicRow({ t, index }: { t: SeoTopic; index: number }): ReactNod
         angle && h("span", { className: "seo-chip" }, angle),
         t.intent && h("span", { className: "seo-chip" }, t.intent),
         h(TrendChip, { trend: t.trend }),
-        h(DifficultyChip, { difficulty: t.difficulty }),
+        h(DifficultyChip, { t }),
       ),
       h("div", { className: "seo-topic__why" }, t.why),
       refresh && h("a", { className: "seo-topic__refresh", href: refresh, target: "_blank", rel: "noreferrer", title: refresh },
@@ -219,5 +224,32 @@ export function TodoPages({ pages }: { pages: unknown }): ReactNode {
     h("ul", null, v.items.map((p, i) => h("li", { key: i },
       p.href ? h("a", { href: p.href, target: "_blank", rel: "noreferrer" }, p.text) : p.text,
     ))),
+  );
+}
+
+/* ---------------------------------------------- the site review's gaps -- */
+
+/** Topics the site does not cover yet. One that is already in the blog plan
+ *  points there — "In your blog plan as #n" — rather than standing as a second
+ *  copy of it — and only while this plan has that place. */
+export function MissingTopics({ list, planSize, onSeeTopic }: {
+  list: SeoSiteReview["missing_topics"] | null | undefined;
+  planSize: number;
+  onSeeTopic?: (n: number) => void;
+}): ReactNode {
+  const items = missingTopics(list);
+  if (!items.length) return null;
+  return h("div", { className: "seo-cluster__kws" },
+    items.map((t, i) => {
+      // a position this plan does not have would be a false pointer
+      if (t.inPlan === null || t.inPlan > planSize) {
+        return h("span", { key: i, className: "seo-chip seo-chip--cov-gap" }, t.text);
+      }
+      const n = t.inPlan;
+      return h("span", { key: i, className: "seo-chip seo-chip--src" },
+        t.text, " · ",
+        h("button", { type: "button", className: "seo-ref", onClick: () => onSeeTopic?.(n) }, `In your blog plan as #${n}`),
+      );
+    }),
   );
 }

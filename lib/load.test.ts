@@ -17,7 +17,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { getDbCollections } from "./api";
 import { DEFAULT_TIMEOUT_MS } from "./requestPolicy";
 import {
-  loadJob, loadPending, loadReady, LoadSession,
+  describeFailure, isNetworkFailure, loadJob, loadPending, loadReady, LoadSession, OFFLINE_MESSAGE,
   type Load, type LoadToast, type Setter,
 } from "./load";
 
@@ -358,5 +358,31 @@ describe("the low-level guard, for state that is not a Load<T>", () => {
     expect(second.failure(new Error("boom"), "Failed to load brand")).toBe("boom");
     expect(second.failure(abortError(), "Failed to load brand")).toBeNull();
     expect(second.failure({}, "Failed to load brand")).toBe("Failed to load brand");
+  });
+});
+
+/* New tests join the owning module. A dropped connection used to reach the
+ * reader as the browser's own words ("Failed to fetch"). */
+describe("a dropped connection is a sentence, not the browser's words", () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  it("says the server could not be reached, through the load rail", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => { throw new TypeError("Failed to fetch"); }));
+    const session = new LoadSession();
+    const state = cell<unknown>(loadPending);
+    const toast = toastSpy();
+    await session.run("collections", () => getDbCollections(), state.set, "Failed to load", { toast });
+    expect(state.get().error).toBe("Couldn't reach the server — check your connection and try again.");
+    expect(toast).toHaveBeenCalledWith(OFFLINE_MESSAGE, "error");
+  });
+
+  it("knows each browser's wording, and only on a TypeError", () => {
+    for (const words of ["Failed to fetch", "NetworkError when attempting to fetch resource.", "Load failed", "Network request failed"]) {
+      expect(describeFailure(new TypeError(words), "x"), words).toBe(OFFLINE_MESSAGE);
+    }
+    // a bug that happens to be a TypeError keeps its own message
+    expect(isNetworkFailure(new TypeError("Cannot read properties of undefined (reading 'brands')"))).toBe(false);
+    // a backend refusal that happens to say "Load failed" is not a dropped connection
+    expect(describeFailure(new Error("Load failed"), "x")).toBe("Load failed");
   });
 });

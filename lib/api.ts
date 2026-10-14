@@ -2785,6 +2785,10 @@ export interface SeoTopic {
   also_in_fix?: number | null;
   /** A typed seed that overlaps an existing page: the page to refresh instead. */
   refresh_url?: string | null;
+  /** For a typed seed we already rank top 3 for: "we rank #n", shown in place
+   *  of the difficulty chip. Field names provisional — both read. */
+  difficulty_label?: string | null;
+  own_rank?: number | null;
 }
 
 export interface SeoGaTotals {
@@ -2849,6 +2853,15 @@ export interface SeoSiteIssue {
   url?: string;
 }
 
+/** A missing topic that is already in the blog plan (`in_blog_plan`, 1-based)
+ *  is pointed at, not repeated. The text field's name is read defensively. */
+export interface SeoMissingTopic {
+  topic?: string;
+  text?: string;
+  keyword?: string;
+  in_blog_plan?: number | null;
+}
+
 /** What the expert review's evidence check kept and threw away. */
 export interface SeoReviewGrounding {
   kept?: number;
@@ -2864,7 +2877,9 @@ export interface SeoSiteReview {
   issues: SeoSiteIssue[];
   suggested_seeds: string[];
   covered_topics: string[];
-  missing_topics: string[];
+  /** A topic the site does not cover yet: a plain string, or — from a newer
+   *  backend — an object that also says where it sits in the blog plan. */
+  missing_topics: (string | SeoMissingTopic)[];
   degraded: string[];
   /** Null/absent on reviews stored before the evidence check existed. */
   grounding?: SeoReviewGrounding | null;

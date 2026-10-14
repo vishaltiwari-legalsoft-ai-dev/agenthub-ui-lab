@@ -66,3 +66,13 @@ export function onSeoOverview(fn: Listener): () => void {
   listeners.add(fn);
   return () => { listeners.delete(fn); };
 }
+
+/** Tell every subscriber about an overview this page already knows to be
+ *  newer — a brand just removed — without waiting for a read. It also
+ *  retires any read still in flight, whose answer predates the change; the
+ *  fresh read the caller starts next confirms it. */
+export function publishSeoOverview(value: SeoOverview): void {
+  seq += 1;
+  inflight = null;
+  listeners.forEach((fn) => fn(value));
+}

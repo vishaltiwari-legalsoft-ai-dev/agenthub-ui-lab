@@ -102,10 +102,15 @@ export function useHub(): HubContextValue {
  *  panel and its sentence leaves with it.
  */
 export function useHeadline(sub: string, title?: string): void {
-  const { setHead } = useHub();
+  const { setHead, route } = useHub();
+  // `route` is a dependency on purpose. Every route change blanks the header
+  // in the same update (`applyRoute` in HubApp), so a panel that stays
+  // mounted across it — a workspace moving between its sections or brands —
+  // has to say its line again even when the line came out the same as before
+  // the move; keyed on the text alone, the header stayed blank.
   useEffect(() => {
     setHead({ sub, title });
-  }, [sub, title, setHead]);
+  }, [sub, title, setHead, route]);
 }
 
 

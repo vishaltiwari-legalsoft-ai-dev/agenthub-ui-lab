@@ -12,16 +12,17 @@ import { describeFailure } from "../../../lib/load";
 import {
   auditEvidence, auditTone, briefSchema, canConnectGsc, connectedLine, finishGoogleReturn, flagChip,
   consoleHeadline, GA_INTEGRATION, GA_SERVICE_ACCOUNT, GSC_CANCELLED, GSC_MISMATCH, pageChips, returnNeedsOverview,
-  subjectOpensInConsole, planItemView, topicAngle, refreshHref, todoPages, todoCategoryLabel, movedFixLinks, GSC_CONNECT_HINT, GSC_CONNECT_UNAVAILABLE, GSC_RETRY, GSC_UNFINISHED, gscFailure,
+  subjectOpensInConsole, planItemView, topicAngle, refreshHref, todoPages, todoCategoryLabel, movedFixLinks,
+  gaStory, morePagesLine, missingTopics, topicDifficulty, plainNotesExcept, GSC_CONNECT_HINT, GSC_CONNECT_UNAVAILABLE, GSC_RETRY, GSC_UNFINISHED, gscFailure,
   gscIntegration, gscReturnSentence,
   gscNotice, gscReturnPath, gscSlot, gscStateBrand, googleReturn, hiddenSuggestionsLine, looksRaw,
   NO_GSC_RETURN, notShownLine, pageRec, planHeading, plainFailure, plainMessage, plainNote, plainNotes, PLAIN_TOPIC_NOTES, readGsc,
   readGscReturn, reviewDropped, todoPage, topicOrigin, type GoogleReturnIO, type NoteContext,
 } from "./seo";
 import {
-  AuditIssueRow, BriefSchema, HiddenSuggestions, PageRow, PlanStrip, ReviewDropped, TodoPages, TopicRow,
+  AuditIssueRow, BriefSchema, HiddenSuggestions, MissingTopics, PageRow, PlanStrip, ReviewDropped, TodoPages, TopicRow,
 } from "./rows";
-import { loadSeoOverview, onSeoOverview } from "./overview";
+import { loadSeoOverview, onSeoOverview, publishSeoOverview } from "./overview";
 
 /* Every Search Console, degraded-note and topic-provenance sentence the SEO
  * screens put up follows from these functions, so this pins what each payload
@@ -1252,7 +1253,7 @@ describe("topics: also on the Fix list, refresh instead, empty impact, angles", 
     expect(out).toContain("An honest cost table both sides would sign.");
     expect(out).not.toContain("Refresh this page instead");
     // and the console draws its topics through this row
-    expect(readFileSync(join(__dirname, "SeoAgent.tsx"), "utf8")).toContain("<TopicRow key={t.keyword} t={t} index={i + 1} />");
+    expect(readFileSync(join(__dirname, "SeoAgent.tsx"), "utf8")).toContain("<TopicRow key={t.keyword} t={t} index={i + 1} focused={topicFocus === i + 1} />");
   });
 });
 
@@ -1388,5 +1389,156 @@ describe("coded 503s from the SEO routes", () => {
   it("show their message, as written for the reader", () => {
     const message = "The site review didn't finish — run it again in a minute.";
     expect(plainFailure(new ApiError(message, 503, { detail: { code: "site_review_failed", message } }), "Site analysis failed")).toBe(message);
+  });
+});
+
+/* ------------------------------------------- round 3 (production fixes) -- */
+
+describe("the analytics story calls each figure what it is", () => {
+  const ga = {
+    totals: { sessions: 21275, users: 17204, new_users: 15000, engagement_rate: 0.5, avg_session_sec: 60, pageviews: 40000 },
+    prev_totals: { sessions: 27000, users: 22000, new_users: 19000, engagement_rate: 0.5, avg_session_sec: 60, pageviews: 50000 },
+    key_events: [{ event: "generate_lead", count: 918 }],
+    channels: [
+      { channel: "Direct", sessions: 9000, prev_sessions: 8000 },
+      { channel: "Organic Search", sessions: 7258, prev_sessions: 9000 },
+    ],
+  };
+
+  it("counts people as GA's users — the Visitors figure — never sessions", () => {
+    const st = gaStory(ga);
+    expect(st).toMatchObject({ count: 17204, unit: "people", leads: 918, google: { visits: 7258, rank: 2 } });
+    expect(st.trend).toBe("down 22% vs the month before"); // 17,204 against 22,000
+  });
+
+  it("falls back to visits, said as visits, for a payload without users", () => {
+    const old = { ...ga, totals: { ...ga.totals, users: undefined as unknown as number }, prev_totals: { ...ga.prev_totals, users: undefined as unknown as number } };
+    expect(gaStory(old)).toMatchObject({ count: 21275, unit: "visits" });
+  });
+
+  it("the console's story says people for users and visits for Google's sessions", () => {
+    const agent = readFileSync(join(__dirname, "SeoAgent.tsx"), "utf8");
+    expect(agent).toContain("const st = gaStory(ga);");
+    expect(agent).toContain("Google search brought <strong>{fmt(st.google.visits)}</strong> visits");
+    expect(agent).not.toContain("{fmt(ga.totals.sessions)} people");
+    expect(agent).not.toMatch(/\bof them\b/);
+  });
+});
+
+describe("a removed brand leaves the list at once", () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  it("publishes the smaller list to every subscriber, and retires an older read", async () => {
+    const { reply } = deferredOverviews();
+    const heard: string[] = [];
+    const off = onSeoOverview((o) => heard.push((o as unknown as { tag: string }).tag));
+    const older = loadSeoOverview(); // in flight from before the delete
+    publishSeoOverview(OV("without-the-brand") as unknown as Parameters<typeof publishSeoOverview>[0]);
+    reply(0, OV("with-the-brand"));
+    await older;
+    await settle();
+    expect(heard).toEqual(["without-the-brand"]);
+    off();
+  });
+
+  it("the console removes it from its own list and the workspace's on a successful delete", () => {
+    const agent = readFileSync(join(__dirname, "SeoAgent.tsx"), "utf8");
+    expect(agent).toMatch(/await seoDeleteBrand\(b\.id\);[\s\S]{0,400}overview\.brands\.filter\(\(c\) => c\.brand\.id !== b\.id\)[\s\S]{0,120}publishSeoOverview\(next\);[\s\S]{0,40}await refreshOverview\(\);/);
+  });
+});
+
+describe("audit findings say when they list only some of their pages", () => {
+  const many = (over: Partial<SeoAuditIssue> = {}): SeoAuditIssue => ({
+    issue: "Missing meta description", severity: "medium", count: 25, fix: "Write one.",
+    pages: Array.from({ length: 15 }, (_, i) => `https://legalsoft.com/p${i}`), ...over,
+  });
+
+  it("adds '+N more' when the count is larger than the list", () => {
+    expect(morePagesLine(many())).toBe("+10 more");
+    expect(html(createElement(AuditIssueRow, { issue: many() }))).toContain("+10 more");
+  });
+
+  it("says nothing when every page is listed", () => {
+    expect(morePagesLine(many({ count: 15 }))).toBeNull();
+    expect(html(createElement(AuditIssueRow, { issue: many({ count: 15 }) }))).not.toContain("more</div>");
+  });
+
+  it("still counts the rest under per-page evidence", () => {
+    const fitIssue = many({
+      kind: "schema-fit", schema_type: "Service", reason: "Service page with no Service markup.",
+      evidence: Array.from({ length: 15 }, (_, i) => ({ page: `https://legalsoft.com/p${i}` })),
+    });
+    expect(html(createElement(AuditIssueRow, { issue: fitIssue }))).toContain("+10 more");
+  });
+});
+
+describe("site-review gaps point at the blog plan instead of repeating it", () => {
+  it("reads strings as before, and objects with their plan position", () => {
+    expect(missingTopics(["remote legal staff security"])).toEqual([{ text: "remote legal staff security", inPlan: null }]);
+    expect(missingTopics([{ topic: "virtual legal assistant cost comparison", in_blog_plan: 3 }]))
+      .toEqual([{ text: "virtual legal assistant cost comparison", inPlan: 3 }]);
+    expect(missingTopics([{ text: "onboarding guide", in_blog_plan: null }])).toEqual([{ text: "onboarding guide", inPlan: null }]);
+    expect(missingTopics([{ in_blog_plan: 2 }, "", 7 as never, null as never])).toEqual([]);
+    expect(missingTopics(undefined)).toEqual([]);
+  });
+
+  it("links 'In your blog plan as #n' to that topic", () => {
+    const seen: number[] = [];
+    const node = MissingTopics({
+      list: ["security protocols", { topic: "cost comparison", in_blog_plan: 3 }], planSize: 10, onSeeTopic: (n) => seen.push(n),
+    });
+    const [link] = buttonsIn(node);
+    expect(textOf(link)).toBe("In your blog plan as #3");
+    link.props?.onClick?.();
+    expect(seen).toEqual([3]);
+    const out = html(createElement(MissingTopics, { list: ["security protocols", { topic: "cost comparison", in_blog_plan: 3 }], planSize: 10 }));
+    expect(out).toContain("security protocols");
+    expect(out).toContain("cost comparison · <button");
+  });
+
+  it("never points at a place the plan on screen does not have", () => {
+    const out = html(createElement(MissingTopics, { list: [{ topic: "cost comparison", in_blog_plan: 12 }], planSize: 10 }));
+    expect(out).not.toContain("In your blog plan");
+    expect(out).toContain("cost comparison");
+  });
+
+  it("the console opens the Blog plan at that topic", () => {
+    const agent = readFileSync(join(__dirname, "SeoAgent.tsx"), "utf8");
+    expect(agent).toContain("<MissingTopics list={siteReview.missing_topics} onSeeTopic={seeTopic}");
+    expect(agent).toContain("open={planOpen} onToggle={setPlanOpen}");
+    expect(agent).toContain("focused={topicFocus === i + 1}");
+    expect(html(createElement(TopicRow, { t: topic(), index: 4 }))).toContain('id="seo-topic-4"');
+  });
+});
+
+describe("a typed seed we already rank top 3 for", () => {
+  it("says 'we rank #n' instead of a red 'hard', from either field", () => {
+    expect(topicDifficulty({ difficulty: "hard", difficulty_label: "we rank #2" })).toEqual({ label: "we rank #2", tone: "rank" });
+    expect(topicDifficulty({ difficulty: "hard", own_rank: 1 })).toEqual({ label: "we rank #1", tone: "rank" });
+    const out = html(createElement(TopicRow, { t: topic({ difficulty: "hard", difficulty_label: "we rank #2" }), index: 1 }));
+    expect(out).toContain('<span class="seo-chip seo-chip--on">we rank #2</span>');
+    expect(out).not.toContain("seo-chip--diff-hard");
+  });
+
+  it("keeps the difficulty as before without them, or outside the top 3", () => {
+    expect(topicDifficulty({ difficulty: "hard" })).toEqual({ label: "hard", tone: "hard" });
+    expect(topicDifficulty({ difficulty: "hard", own_rank: 7 })).toEqual({ label: "hard", tone: "hard" });
+    expect(topicDifficulty({ difficulty: "easy win", difficulty_label: "" })).toEqual({ label: "easy win", tone: "easy" });
+    expect(topicDifficulty({ difficulty: null })).toEqual({ label: "—", tone: "none" });
+  });
+});
+
+describe("the Search Console note is said once, at the top", () => {
+  it("drops from the Pages tab what the brand screen already said", () => {
+    const said = plainNotes(["Search Console: rejected"], CTX);
+    expect(plainNotesExcept(["Search Console: rejected", "Google Analytics: no property"], CTX, said))
+      .toEqual([`Google Analytics isn't connected for berry.com. ${GA_SERVICE_ACCOUNT}`]);
+    expect(plainNotesExcept(["Search Console: rejected"], CTX, [])).toEqual(said);
+  });
+
+  it("the Pages tab is handed the run's notes", () => {
+    const agent = readFileSync(join(__dirname, "SeoAgent.tsx"), "utf8");
+    expect(agent).toContain("saidAbove={run ? plainNotes(run.degraded, noteCtx) : []}");
+    expect(agent).toContain("<DegradedNotes notes={doc.notes} ctx={noteCtx} except={saidAbove} />");
   });
 });

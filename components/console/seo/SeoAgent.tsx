@@ -12,12 +12,14 @@ import { useAuth } from "@/lib/auth";
 import { Icon } from "@/lib/kit-ui";
 import { useLoadSession } from "@/lib/load";
 import { AskView, AuditView, BriefsView, CompetitorsView, KeywordsView, UpdatePlanButton } from "./labs";
-import { loadSeoOverview } from "./overview";
+import { loadSeoOverview, publishSeoOverview } from "./overview";
 import {
-  gscFailure, gscSlot, notShownLine, plainFailure, plainMessage, plainNotes, readGsc, todoCategoryLabel, todoPage,
-  type NoteContext,
+  gaStory, gscFailure, gscSlot, notShownLine, pctPhrase, plainFailure, plainMessage, plainNotes, plainNotesExcept,
+  readGsc, todoCategoryLabel, todoPage, type NoteContext,
 } from "./seo";
-import { HiddenSuggestions, PageRow, PlanStrip, ReviewDropped, TodoPages, TopicRow, type SeeFix } from "./rows";
+import {
+  HiddenSuggestions, MissingTopics, PageRow, PlanStrip, ReviewDropped, TodoPages, TopicRow, type SeeFix,
+} from "./rows";
 
 type SeoTool = "ask" | "keywords" | "briefs" | "audit";
 
@@ -55,8 +57,12 @@ function Delta({ now, prev }: { now: number; prev: number }) {
 
 /** What this run could not reach, as plain sentences — never the exception
  *  text the backend recorded (`seo.ts`, `plainNotes`). */
-function DegradedNotes({ notes, ctx }: { notes: readonly unknown[]; ctx: NoteContext }) {
-  const friendly = plainNotes(notes, ctx);
+function DegradedNotes({ notes, ctx, except = [] }: {
+  notes: readonly unknown[]; ctx: NoteContext;
+  /** Sentences already shown higher on this screen — said once, there. */
+  except?: readonly string[];
+}) {
+  const friendly = plainNotesExcept(notes, ctx, except);
   if (!friendly.length) return null;
   return (
     <div className="seo-degraded">
@@ -66,8 +72,10 @@ function DegradedNotes({ notes, ctx }: { notes: readonly unknown[]; ctx: NoteCon
   );
 }
 
-function PagesView({ doc, busy, error, onRefresh, noteCtx, todos, onSeeFix }: {
+function PagesView({ doc, busy, error, onRefresh, noteCtx, todos, onSeeFix, saidAbove }: {
   doc: SeoPagesDoc | null; busy: boolean; error: string | null; onRefresh: () => void; noteCtx: NoteContext;
+  /** The run's notes, already shown at the top of the brand screen. */
+  saidAbove: readonly string[];
   /** The run's Fix list, for the links from advice that moved there. */
   todos: SeoRun["todos"]; onSeeFix: SeeFix;
 }) {
@@ -103,7 +111,7 @@ function PagesView({ doc, busy, error, onRefresh, noteCtx, todos, onSeeFix }: {
         </button>
       </div>
       {/* the pages doc forwards the run's Search Console / Analytics failures */}
-      <DegradedNotes notes={doc.notes} ctx={noteCtx} />
+      <DegradedNotes notes={doc.notes} ctx={noteCtx} except={saidAbove} />
       <HiddenSuggestions grounding={doc.grounding} fixItems={doc.fix_items} todos={todos} onSeeFix={onSeeFix} />
       {doc.pages.length === 0 && (
         <div className="seo-empty">No pages found — run the site analysis, then refresh this tab.</div>
@@ -111,13 +119,6 @@ function PagesView({ doc, busy, error, onRefresh, noteCtx, todos, onSeeFix }: {
       {doc.pages.map((p) => <PageRow key={p.path} p={p} />)}
     </div>
   );
-}
-
-function pctPhrase(now: number, prev: number): string {
-  if (!prev) return "";
-  const d = Math.round(((now - prev) / prev) * 100);
-  if (d === 0) return "steady vs the month before";
-  return d > 0 ? `up ${d}% vs the month before` : `down ${Math.abs(d)}% vs the month before`;
 }
 
 /** The panel speaks first: what happened, in sentences a busy owner can read in 5 seconds. */
@@ -131,21 +132,19 @@ function Story({ run }: { run: SeoRun | null }) {
   }
   const ga = run.ga;
   if (ga) {
-    const lead = ga.key_events.find((e) => e.event === "generate_lead");
-    const organic = ga.channels.find((c) => c.channel === "Organic Search");
-    const organicRank = organic ? ga.channels.filter((c) => c.sessions > organic.sessions).length + 1 : 0;
-    const trend = pctPhrase(ga.totals.sessions, ga.prev_totals.sessions);
+    // People are GA's users — the Visitors figure below; sessions are visits.
+    const st = gaStory(ga);
     return (
       <div className="seo-story">
         <p>
-          <strong>{fmt(ga.totals.sessions)} people</strong> visited your site in the last 28 days
-          {trend ? ` — ${trend}` : ""}.
+          <strong>{fmt(st.count)} {st.unit}</strong> {st.unit === "people" ? "visited your site" : "to your site"} in the last 28 days
+          {st.trend ? ` — ${st.trend}` : ""}.
         </p>
         <p>
-          {lead && <><strong>{fmt(lead.count)}</strong> became leads. </>}
-          {organic && (
-            <>Google search brought <strong>{fmt(organic.sessions)}</strong> of them
-              {organicRank > 0 ? ` — your #${organicRank} traffic source` : ""}.</>
+          {st.leads !== null && <><strong>{fmt(st.leads)}</strong> {st.leads === 1 ? "lead" : "leads"} came in. </>}
+          {st.google && (
+            <>Google search brought <strong>{fmt(st.google.visits)}</strong> visits
+              {st.google.rank > 0 ? ` — your #${st.google.rank} traffic source` : ""}.</>
           )}
         </p>
       </div>
@@ -358,6 +357,9 @@ export function SeoAgent({ onToast, onBack, focusBrand, onFocused, onBrandChange
   /** The Fix list's fold, and the item a "See Fix list #n" link points at. */
   const [fixOpen, setFixOpen] = useState(false);
   const [fixFocus, setFixFocus] = useState<string | null>(null);
+  /** The Blog plan's fold, and the topic an "In your blog plan as #n" opened. */
+  const [planOpen, setPlanOpen] = useState(false);
+  const [topicFocus, setTopicFocus] = useState<number | null>(null);
 
   const session = useLoadSession();
 
@@ -406,6 +408,22 @@ export function SeoAgent({ onToast, onBack, focusBrand, onFocused, onBrandChange
     const done = setTimeout(() => setFixFocus(null), 2400);
     return () => { cancelAnimationFrame(frame); clearTimeout(done); };
   }, [fixFocus]);
+
+  /** Open the Blog plan at topic #n (its place in the list shown). */
+  const seeTopic = useCallback((n: number) => {
+    setPlanOpen(true);
+    setTopicFocus(n);
+  }, []);
+  useEffect(() => {
+    if (topicFocus === null) return;
+    const frame = requestAnimationFrame(() => {
+      const el = document.getElementById(`seo-topic-${topicFocus}`);
+      el?.scrollIntoView({ behavior: "smooth", block: "center" });
+      el?.focus({ preventScroll: true });
+    });
+    const done = setTimeout(() => setTopicFocus(null), 2400);
+    return () => { cancelAnimationFrame(frame); clearTimeout(done); };
+  }, [topicFocus]);
 
   /** Back to the brand list. */
   function closeBrand() {
@@ -562,6 +580,13 @@ export function SeoAgent({ onToast, onBack, focusBrand, onFocused, onBrandChange
       await seoDeleteBrand(b.id);
       onToast(`${b.name} removed`);
       closeBrand();
+      // Off the list now, here and in the workspace's switcher; the fresh
+      // read below confirms it rather than being waited for.
+      if (overview) {
+        const next = { ...overview, brands: overview.brands.filter((c) => c.brand.id !== b.id) };
+        setOverview(next);
+        publishSeoOverview(next);
+      }
       await refreshOverview();
     } catch (e) {
       onToast(plainFailure(e, "Remove failed"), "error");
@@ -758,11 +783,8 @@ export function SeoAgent({ onToast, onBack, focusBrand, onFocused, onBrandChange
                 {siteReview.missing_topics.length > 0 && (
                   <>
                     <div className="seo-lab__meta">Topics the site doesn't cover yet — blog fuel:</div>
-                    <div className="seo-cluster__kws">
-                      {siteReview.missing_topics.map((t) => (
-                        <span key={t} className="seo-chip seo-chip--cov-gap">{t}</span>
-                      ))}
-                    </div>
+                    <MissingTopics list={siteReview.missing_topics} onSeeTopic={seeTopic}
+                                   planSize={run ? run.topics.filter((t) => !t.avoided).length : 0} />
                   </>
                 )}
                 <div className="seo-lab__meta">
@@ -855,6 +877,7 @@ export function SeoAgent({ onToast, onBack, focusBrand, onFocused, onBrandChange
             <Fold title="Pages" count={pagesDoc?.pages.length} hint="traffic + health, page by page">
               <PagesView doc={pagesDoc} busy={pagesBusy} error={pagesError} noteCtx={noteCtx}
                 todos={run?.todos ?? []} onSeeFix={seeFix}
+                saidAbove={run ? plainNotes(run.degraded, noteCtx) : []}
                 onRefresh={() => void refreshPages(brand.id)} />
             </Fold>
 
@@ -948,7 +971,7 @@ export function SeoAgent({ onToast, onBack, focusBrand, onFocused, onBrandChange
                 </Fold>
 
                 <Fold title="Blog plan" count={run.topics.filter((t) => !t.avoided).length}
-                      hint="the next posts to publish">
+                      hint="the next posts to publish" open={planOpen} onToggle={setPlanOpen}>
                 {(() => {
                   const liveTopics = run.topics.filter((t) => !t.avoided);
                   const avoidedTopics = run.topics.filter((t) => t.avoided);
@@ -958,7 +981,9 @@ export function SeoAgent({ onToast, onBack, focusBrand, onFocused, onBrandChange
                       {liveTopics.length === 0 && avoidedTopics.length === 0 && (
                         <div className="seo-empty">No topics yet — add seed keywords to this brand and refresh.</div>
                       )}
-                      {liveTopics.map((t, i) => <TopicRow key={t.keyword} t={t} index={i + 1} />)}
+                      {liveTopics.map((t, i) => (
+                        <TopicRow key={t.keyword} t={t} index={i + 1} focused={topicFocus === i + 1} />
+                      ))}
                       {avoidedTopics.length > 0 && (
                         <div className="seo-avoided">
                           <button className="seo-btn seo-avoided__toggle" onClick={() => setShowAvoided((v) => !v)}>

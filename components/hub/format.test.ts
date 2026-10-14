@@ -1,3 +1,5 @@
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { until } from "./format";
 import type { Ask, HumansDay, HumansMonth, TeamReportee } from "@/lib/api";
@@ -792,5 +794,18 @@ describe("work-bar subject picker", () => {
     const copy = [...subjects];
     filterSubjects(subjects, "virtual");
     expect(subjects).toEqual(copy);
+  });
+});
+
+/* Every route change blanks the header in the same update; a workspace that
+ * stays mounted across sections must say its line again even when the line
+ * came out the same (console on brand X → Dashboard of X left it blank). */
+describe("useHeadline re-asserts after every route change", () => {
+  it("depends on the route as well as the text", () => {
+    const ctx = readFileSync(join(__dirname, "context.tsx"), "utf8");
+    expect(ctx).toMatch(/const \{ setHead, route \} = useHub\(\);[\s\S]{0,600}\}, \[sub, title, setHead, route\]\);/);
+    const hub = readFileSync(join(__dirname, "HubApp.tsx"), "utf8");
+    // the reset it answers: the headline blanks with every route
+    expect(hub).toMatch(/const applyRoute = useCallback\(\(next: Route\) => \{\s*setHeadState\(\{ sub: "" \}\);/);
   });
 });

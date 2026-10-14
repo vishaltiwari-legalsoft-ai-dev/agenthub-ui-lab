@@ -26,8 +26,8 @@
  */
 
 import type {
-  SeoAuditIssue, SeoBrandCard, SeoBrief, SeoGscStatus, SeoOverview, SeoPageIntel, SeoPagesDoc, SeoPagesGrounding,
-  SeoPlanItem, SeoReviewGrounding, SeoTodo, SeoTopic,
+  SeoAuditIssue, SeoBrandCard, SeoBrief, SeoGa, SeoGscStatus, SeoOverview, SeoPageIntel, SeoPagesDoc,
+  SeoPagesGrounding, SeoPlanItem, SeoReviewGrounding, SeoSiteReview, SeoTodo, SeoTopic,
 } from "@/lib/api";
 // Values come in by relative path: the test suite runs without the `@/` alias,
 // which only erased type imports can use.
@@ -405,6 +405,13 @@ export function plainNote(note: string, c: NoteContext): string {
   const rule = RULES.find((r) => n.startsWith(r.prefix));
   if (rule) return rule.say(c);
   return looksRaw(n) ? GENERIC_NOTE : n;
+}
+
+/** Every note, plain and once each, minus any already said on this screen —
+ *  the pages doc forwards the run's Search Console / Analytics notes, which
+ *  the brand screen has already shown at the top. */
+export function plainNotesExcept(notes: readonly unknown[] | null | undefined, c: NoteContext, said: readonly string[]): string[] {
+  return plainNotes(notes, c).filter((n) => !said.includes(n));
 }
 
 /** Every note, plain and once each — two Serper failures are one sentence. */
@@ -814,4 +821,75 @@ export function subjectOpensInConsole(t: {
 }): boolean {
   return t.prevSection === "console" && t.section === "console"
     && t.subject !== t.prevSubject && !!t.subject && t.subject !== t.shown;
+}
+
+/* --------------------------------------------------- round 3 readings -- */
+
+/** "up 12% vs the month before", "" when there is nothing to compare. */
+export function pctPhrase(now: number, prev: number): string {
+  if (!prev) return "";
+  const d = Math.round(((now - prev) / prev) * 100);
+  if (d === 0) return "steady vs the month before";
+  return d > 0 ? `up ${d}% vs the month before` : `down ${Math.abs(d)}% vs the month before`;
+}
+
+/** The analytics story's figures, each called what it is. People are GA's
+ *  users (the Visitors tile); sessions are visits and are never called
+ *  people. A payload without users falls back to visits, said as visits. */
+export function gaStory(ga: Pick<SeoGa, "totals" | "prev_totals" | "key_events" | "channels">): {
+  count: number; unit: "people" | "visits"; trend: string; leads: number | null;
+  google: { visits: number; rank: number } | null;
+} {
+  const num = (v: unknown) => (typeof v === "number" && Number.isFinite(v) ? v : null);
+  const users = num(ga.totals?.users);
+  const people = users !== null;
+  const count = people ? users : num(ga.totals?.sessions) ?? 0;
+  const prev = people ? num(ga.prev_totals?.users) ?? 0 : num(ga.prev_totals?.sessions) ?? 0;
+  const lead = (ga.key_events ?? []).find((e) => e.event === "generate_lead");
+  const channels = ga.channels ?? [];
+  const organic = channels.find((c) => c.channel === "Organic Search");
+  return {
+    count,
+    unit: people ? "people" : "visits",
+    trend: pctPhrase(count, prev),
+    leads: lead ? lead.count : null,
+    google: organic
+      ? { visits: organic.sessions, rank: channels.filter((c) => c.sessions > organic.sessions).length + 1 }
+      : null,
+  };
+}
+
+/** "+10 more" when an audit finding lists fewer pages than it counts. */
+export function morePagesLine(i: Pick<SeoAuditIssue, "count" | "pages">): string | null {
+  const shown = Array.isArray(i.pages) ? i.pages.length : 0;
+  const n = typeof i.count === "number" ? i.count - shown : 0;
+  return n > 0 ? `+${n} more` : null;
+}
+
+/** The review's missing topics, each with its blog-plan position when it
+ *  has one. Strings (every backend so far) read as before. */
+export function missingTopics(list: SeoSiteReview["missing_topics"] | null | undefined): { text: string; inPlan: number | null }[] {
+  if (!Array.isArray(list)) return [];
+  return list.flatMap((item) => {
+    if (typeof item === "string") return item.trim() ? [{ text: item, inPlan: null }] : [];
+    if (!item || typeof item !== "object") return [];
+    const text = str(item.topic) ?? str(item.text) ?? str(item.keyword);
+    if (!text) return [];
+    const n = item.in_blog_plan;
+    return [{ text, inPlan: typeof n === "number" && n >= 1 ? Math.floor(n) : null }];
+  });
+}
+
+/** A topic's difficulty chip. A typed seed we already rank top 3 for says so
+ *  ("we rank #2") instead of a red "hard". */
+export function topicDifficulty(t: Pick<SeoTopic, "difficulty" | "difficulty_label" | "own_rank">): {
+  label: string; tone: "rank" | "easy" | "medium" | "hard" | "none";
+} {
+  const label = str(t.difficulty_label);
+  if (label) return { label, tone: "rank" };
+  const rank = t.own_rank;
+  if (typeof rank === "number" && rank >= 1 && rank <= 3) return { label: `we rank #${Math.floor(rank)}`, tone: "rank" };
+  const d = str(t.difficulty);
+  if (!d) return { label: "—", tone: "none" };
+  return { label: d, tone: d === "easy win" ? "easy" : d === "medium" ? "medium" : "hard" };
 }
