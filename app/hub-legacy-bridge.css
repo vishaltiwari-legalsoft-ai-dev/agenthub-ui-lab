@@ -198,3 +198,136 @@
   --gd2-remix-border: rgba(233, 194, 74, 0.5);
   --gd2-dotgrid: rgba(31, 36, 44, 0.055);
 }
+
+/* ---- the same bridge, at night ----------------------------------------
+ *
+ * Everything above is the light skin written out as literals, and a custom
+ * property set on `.legacy` beats the one `tokens/colors.css` sets on
+ * `:root[data-theme="dark"]` — `.legacy` is the nearer ancestor, so that is
+ * simply where inheritance stops. Without this block the dark console kept
+ * ink text (`--text-primary: #0D0F12`) and ink controls on a navy page: the
+ * Blog Writer's draft titles, the SEO console's headings and every `.gd2`
+ * label vanished while the secondary text next to them, which the bridge
+ * never overrode, stayed readable.
+ *
+ * Same decisions, other way up: the page is the shell's `--bg`, ink is the
+ * shell's `--fg` (what the work bar and every panel read), controls go
+ * parchment with the page colour as their ink, and the alpha ramps are
+ * mixed from `--fg` so they follow it. Status colours still untouched. */
+[data-theme="dark"] .app2 .legacy {
+  /* ---- the page ---- */
+  --bg-app: var(--bg);
+  --ink: var(--fg);
+  --gray-900: var(--fg);
+  --text-primary: var(--fg);
+  --text-link: var(--fg);
+
+  /* ---- brand & action: controls go parchment ---- */
+  --blue-50: color-mix(in srgb, var(--fg) 5%, transparent);
+  --blue-100: color-mix(in srgb, var(--fg) 8%, transparent);
+  --blue-200: color-mix(in srgb, var(--fg) 14%, transparent);
+  --blue-300: var(--fg-3);
+  --blue-400: var(--fg-2);
+  --blue-500: var(--fg-2);
+  --blue-600: var(--fg);
+  --blue-700: var(--fg);
+  --blue-800: #FFFFFF;
+  --blue-900: #FFFFFF;
+
+  --brand: var(--fg);
+  --brand-hover: #FFFFFF;
+  --brand-active: var(--fg-2);
+  --brand-light: var(--fg-3);
+  --brand-subtle: color-mix(in srgb, var(--fg) 5%, transparent);
+  --brand-bg: color-mix(in srgb, var(--fg) 8%, transparent);
+  --brand-border: color-mix(in srgb, var(--fg) 16%, transparent);
+  --on-brand: var(--bg);
+
+  --action: var(--fg);
+  --action-hover: #FFFFFF;
+  --action-active: var(--fg-2);
+  --on-action: var(--bg);
+
+  /* ---- the second accent ---- */
+  --accent-50: color-mix(in srgb, var(--fg) 5%, transparent);
+  --accent-100: color-mix(in srgb, var(--fg) 9%, transparent);
+  --accent-200: color-mix(in srgb, var(--fg) 14%, transparent);
+  --accent-400: var(--fg-2);
+  --accent-500: var(--fg);
+  --accent-600: #FFFFFF;
+  --accent-700: #FFFFFF;
+  --accent: var(--fg);
+  --accent-hover: #FFFFFF;
+  --accent-active: var(--fg-2);
+  --accent-subtle: color-mix(in srgb, var(--fg) 6%, transparent);
+  --on-accent: var(--bg);
+
+  --focus-ring: color-mix(in srgb, var(--fg) 18%, transparent);
+
+  /* ---- gradients flatten onto the night page ---- */
+  --grad-brand: linear-gradient(135deg, var(--fg) 0%, var(--fg) 100%);
+  --grad-brand-soft: linear-gradient(135deg, rgba(255, 216, 77, 0.1) 0%, var(--bg) 100%);
+  --grad-duo: linear-gradient(135deg, var(--fg) 0%, var(--fg-3) 100%);
+  --grad-accent: linear-gradient(135deg, var(--fg) 0%, var(--fg) 100%);
+  --grad-hero: radial-gradient(120% 90% at 85% 0%, rgba(255, 216, 77, 0.06) 0%, var(--bg) 60%, var(--bg) 100%);
+
+  /* ---- depth: the night is blue, so are its shadows ---- */
+  --shadow-xs: 0 1px 2px rgba(2, 6, 23, 0.3);
+  --shadow-sm: 0 1px 2px rgba(2, 6, 23, 0.35);
+  --shadow-md: 0 10px 24px -16px rgba(2, 6, 23, 0.6);
+  --shadow-lg: 0 18px 40px -28px rgba(2, 6, 23, 0.7);
+  --shadow-xl: 0 32px 72px -32px rgba(2, 6, 23, 0.8);
+
+  --border-subtle: color-mix(in srgb, var(--fg) 8%, transparent);
+  --border: color-mix(in srgb, var(--fg) 13%, transparent);
+  --border-strong: color-mix(in srgb, var(--fg) 22%, transparent);
+
+  --glass: color-mix(in srgb, var(--surface-2) 74%, transparent);
+  --glass-strong: color-mix(in srgb, var(--surface-2) 85%, transparent);
+}
+
+/* The studio's intake screen and chrome: `gd2.css` carries its own dark
+   palette, but the two light blocks above outrank it by source order, so the
+   dark studio was ink text on the dark cards `gd2.css` still supplied. */
+[data-theme="dark"] .app2 .legacy .gdx-scroll {
+  --gdx-page-bg: var(--bg);
+  --gdx-grad: linear-gradient(96deg, var(--fg) 0%, var(--fg) 100%);
+  --gdx-grad-text: linear-gradient(92deg, var(--fg) 0%, var(--fg) 100%);
+  --gdx-ink: var(--fg);
+  --gdx-ink2: var(--fg-2);
+  --gdx-label: var(--fg-3);
+  --gdx-muted: var(--fg-3);
+  --gdx-border: color-mix(in srgb, var(--fg) 10%, transparent);
+  --gdx-field-border: color-mix(in srgb, var(--fg) 12%, transparent);
+  --gdx-field-border-hover: color-mix(in srgb, var(--fg) 24%, transparent);
+  --gdx-strip: var(--surface-2);
+  --gdx-strip-border: color-mix(in srgb, var(--fg) 8%, transparent);
+  --gdx-accent: var(--fg);
+  --gdx-ring: color-mix(in srgb, var(--fg) 18%, transparent);
+  --gdx-tv: rgba(233, 194, 74, 0.16);
+  --gdx-tvi: #E9C24A;
+  --gdx-dots: rgba(233, 194, 74, 0.35);
+  --gdx-badge-bg: rgba(233, 194, 74, 0.16);
+  --gdx-card-shadow: 0 24px 56px -40px rgba(2, 6, 23, 0.7), 0 1px 2px rgba(2, 6, 23, 0.4);
+  --gdx-cta-glow: 0 16px 32px -18px rgba(2, 6, 23, 0.8);
+  --gdx-cta-glow-hover: 0 22px 40px -18px rgba(2, 6, 23, 0.9);
+}
+
+[data-theme="dark"] .app2 .legacy .gd2 {
+  --gd2-paper: var(--bg);
+  --gd2-ink: var(--fg);
+  --gd2-line: color-mix(in srgb, var(--fg) 10%, transparent);
+  --gd2-line2: color-mix(in srgb, var(--fg) 18%, transparent);
+  --gd2-accent: var(--fg);
+  --gd2-royal: var(--fg);
+  --gd2-accent-ring: color-mix(in srgb, var(--fg) 14%, transparent);
+  --gd2-accent-tint: color-mix(in srgb, var(--fg) 5%, transparent);
+  --gd2-btn-bg: var(--fg);
+  --gd2-btn-hover: #FFFFFF;
+  --gd2-inkwell: var(--fg);
+  --gd2-ai-border: rgba(233, 194, 74, 0.5);
+  --gd2-ai-tint: rgba(255, 216, 77, 0.1);
+  --gd2-remix-bg: rgba(255, 216, 77, 0.16);
+  --gd2-remix-border: rgba(233, 194, 74, 0.5);
+  --gd2-dotgrid: rgba(168, 183, 224, 0.09);
+}
