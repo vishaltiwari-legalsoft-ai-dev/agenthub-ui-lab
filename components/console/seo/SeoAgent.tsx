@@ -783,7 +783,9 @@ export function SeoAgent({ onToast, onBack, focusBrand, onFocused, onBrandChange
                 {siteReview.missing_topics.length > 0 && (
                   <>
                     <div className="seo-lab__meta">Topics the site doesn't cover yet — blog fuel:</div>
-                    <MissingTopics list={siteReview.missing_topics} onSeeTopic={seeTopic}
+                    {/* the detail carries each topic's place in the blog plan; an
+                        older backend sends only the strings */}
+                    <MissingTopics list={siteReview.missing_topics_detail ?? siteReview.missing_topics} onSeeTopic={seeTopic}
                                    planSize={run ? run.topics.filter((t) => !t.avoided).length : 0} />
                   </>
                 )}

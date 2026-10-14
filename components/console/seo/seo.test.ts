@@ -1504,7 +1504,7 @@ describe("site-review gaps point at the blog plan instead of repeating it", () =
 
   it("the console opens the Blog plan at that topic", () => {
     const agent = readFileSync(join(__dirname, "SeoAgent.tsx"), "utf8");
-    expect(agent).toContain("<MissingTopics list={siteReview.missing_topics} onSeeTopic={seeTopic}");
+    expect(agent).toContain("onSeeTopic={seeTopic}");
     expect(agent).toContain("open={planOpen} onToggle={setPlanOpen}");
     expect(agent).toContain("focused={topicFocus === i + 1}");
     expect(html(createElement(TopicRow, { t: topic(), index: 4 }))).toContain('id="seo-topic-4"');
@@ -1540,5 +1540,59 @@ describe("the Search Console note is said once, at the top", () => {
     const agent = readFileSync(join(__dirname, "SeoAgent.tsx"), "utf8");
     expect(agent).toContain("saidAbove={run ? plainNotes(run.degraded, noteCtx) : []}");
     expect(agent).toContain("<DegradedNotes notes={doc.notes} ctx={noteCtx} except={saidAbove} />");
+  });
+});
+
+/* ------------------------------ final field names (backend 289d864) -- */
+
+describe("missing topics: the detail list carries the pointer", () => {
+  it("reads missing_topics_detail as the backend sends it", () => {
+    const detail = [
+      { topic: "virtual legal assistant cost comparison", in_blog_plan: 3 },
+      { topic: "remote legal staff security protocols", in_blog_plan: null },
+    ];
+    expect(missingTopics(detail)).toEqual([
+      { text: "virtual legal assistant cost comparison", inPlan: 3 },
+      { text: "remote legal staff security protocols", inPlan: null },
+    ]);
+    const out = html(createElement(MissingTopics, { list: detail, planSize: 10 }));
+    expect(out).toContain("In your blog plan as #3");
+    expect(out.split("In your blog plan").length - 1).toBe(1);
+  });
+
+  it("falls back to the plain strings of an older backend, with no pointer", () => {
+    const review = { missing_topics: ["cost comparison", "security protocols"] } as { missing_topics: string[]; missing_topics_detail?: null };
+    const out = html(createElement(MissingTopics, { list: review.missing_topics_detail ?? review.missing_topics, planSize: 10 }));
+    expect(out).toContain("cost comparison");
+    expect(out).not.toContain("In your blog plan");
+  });
+
+  it("the console prefers the detail and falls back to the strings", () => {
+    const agent = readFileSync(join(__dirname, "SeoAgent.tsx"), "utf8");
+    expect(agent).toContain("<MissingTopics list={siteReview.missing_topics_detail ?? siteReview.missing_topics} onSeeTopic={seeTopic}");
+  });
+});
+
+describe("an invented-number drop says what the reader can check", () => {
+  const drop = (over: Record<string, unknown>) => ({ reason: "invented-number", insight: "Pricing page lists no tiers", detail: "x", ...over });
+  const why = (d: Record<string, unknown>) => reviewDropped({ dropped: [drop(d)] as never })?.items[0].reason;
+
+  it("names the figures the finding itself cited", () => {
+    expect(why({ field: "insight", numbers: ["30%", "$4,000"] })).toBe("it cited 30% and $4,000 — not on the page");
+    expect(why({ field: "insight", numbers: ["1100", "1700", "28"] })).toBe("it cited 1100, 1700 and 28 — not on the page");
+  });
+
+  it("says when only the evidence behind it cited them", () => {
+    expect(why({ field: "evidence", numbers: ["920"], evidence: "https://legalsoft.com/bookkeeper (920w) — …" }))
+      .toBe("the evidence behind it cites 920, not in the page's data");
+  });
+
+  it("keeps the general wording for an older review, or one without figures", () => {
+    expect(why({})).toBe("it cited a number that isn't on the page");
+    expect(why({ field: "insight", numbers: [] })).toBe("it cited a number that isn't on the page");
+    expect(why({ field: "elsewhere", numbers: ["5"] })).toBe("it cited a number that isn't on the page");
+    // other reasons are untouched by the new fields
+    expect(reviewDropped({ dropped: [{ reason: "duplicate", insight: "x", detail: "y", field: "insight", numbers: ["1"] }] })?.items[0].reason)
+      .toBe("it repeated another finding");
   });
 });

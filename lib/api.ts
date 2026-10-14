@@ -2854,9 +2854,10 @@ export interface SeoSiteIssue {
 }
 
 /** A missing topic that is already in the blog plan (`in_blog_plan`, 1-based)
- *  is pointed at, not repeated. The text field's name is read defensively. */
+ *  is pointed at, not repeated. */
 export interface SeoMissingTopic {
   topic?: string;
+  /** Read too, defensively. */
   text?: string;
   keyword?: string;
   in_blog_plan?: number | null;
@@ -2865,7 +2866,17 @@ export interface SeoMissingTopic {
 /** What the expert review's evidence check kept and threw away. */
 export interface SeoReviewGrounding {
   kept?: number;
-  dropped?: { reason: string; insight: string; detail: string }[];
+  dropped?: {
+    reason: string;
+    insight: string;
+    detail: string;
+    /** invented-number: which text cited the figures — the finding itself
+     *  ("insight") or the evidence behind it ("evidence") — and which figures.
+     *  Absent on reviews stored before. */
+    field?: "insight" | "evidence";
+    numbers?: string[];
+    evidence?: string;
+  }[];
 }
 
 export interface SeoSiteReview {
@@ -2877,9 +2888,10 @@ export interface SeoSiteReview {
   issues: SeoSiteIssue[];
   suggested_seeds: string[];
   covered_topics: string[];
-  /** A topic the site does not cover yet: a plain string, or — from a newer
-   *  backend — an object that also says where it sits in the blog plan. */
-  missing_topics: (string | SeoMissingTopic)[];
+  missing_topics: string[];
+  /** The same topics, each with its 1-based place among the live blog-plan
+   *  topics (null: not in the plan). Absent on older backends. */
+  missing_topics_detail?: SeoMissingTopic[] | null;
   degraded: string[];
   /** Null/absent on reviews stored before the evidence check existed. */
   grounding?: SeoReviewGrounding | null;

@@ -10,8 +10,8 @@
 
 import { createElement as h, Fragment, type ReactNode } from "react";
 import type {
-  SeoAuditIssue, SeoBrief, SeoPageIntel, SeoPagesDoc, SeoPagesGrounding, SeoPlanItem, SeoReviewGrounding,
-  SeoSiteReview, SeoTodo, SeoTopic,
+  SeoAuditIssue, SeoBrief, SeoMissingTopic, SeoPageIntel, SeoPagesDoc, SeoPagesGrounding, SeoPlanItem,
+  SeoReviewGrounding, SeoTodo, SeoTopic,
 } from "@/lib/api";
 import {
   auditEvidence, auditTone, briefSchema, hiddenSuggestionsLine, missingTopics, morePagesLine, movedFixLinks, pageChips,
@@ -233,7 +233,8 @@ export function TodoPages({ pages }: { pages: unknown }): ReactNode {
  *  points there — "In your blog plan as #n" — rather than standing as a second
  *  copy of it — and only while this plan has that place. */
 export function MissingTopics({ list, planSize, onSeeTopic }: {
-  list: SeoSiteReview["missing_topics"] | null | undefined;
+  /** `missing_topics_detail`, or an older backend's `missing_topics` strings. */
+  list: readonly (string | SeoMissingTopic)[] | null | undefined;
   planSize: number;
   onSeeTopic?: (n: number) => void;
 }): ReactNode {

@@ -26,8 +26,8 @@
  */
 
 import type {
-  SeoAuditIssue, SeoBrandCard, SeoBrief, SeoGa, SeoGscStatus, SeoOverview, SeoPageIntel, SeoPagesDoc,
-  SeoPagesGrounding, SeoPlanItem, SeoReviewGrounding, SeoSiteReview, SeoTodo, SeoTopic,
+  SeoAuditIssue, SeoBrandCard, SeoBrief, SeoGa, SeoGscStatus, SeoMissingTopic, SeoOverview, SeoPageIntel,
+  SeoPagesDoc, SeoPagesGrounding, SeoPlanItem, SeoReviewGrounding, SeoTodo, SeoTopic,
 } from "@/lib/api";
 // Values come in by relative path: the test suite runs without the `@/` alias,
 // which only erased type imports can use.
@@ -689,6 +689,25 @@ const CONTRADICTED = "contradicted-by-page";
 const UNCHECKABLE = "unverifiable-absence";
 const EVIDENCE_REASONS = new Set([...NO_EVIDENCE, CONTRADICTED, UNCHECKABLE]);
 
+/** "30%, $4,000 and 12" — figures as the backend quoted them. */
+function figureList(numbers: unknown): string | null {
+  const list = strs(numbers).slice(0, 5);
+  if (!list.length) return null;
+  return list.length === 1 ? list[0] : `${list.slice(0, -1).join(", ")} and ${list[list.length - 1]}`;
+}
+
+/** Why an invented-number drop went, true of what the reader can see: the
+ *  finding shown names the figures, or only its hidden evidence did. Null
+ *  for any other drop, and for an older review without `field`. */
+function inventedNumberReason(d: { reason?: unknown; field?: unknown; numbers?: unknown }): string | null {
+  if (d.reason !== "invented-number") return null;
+  const figures = figureList(d.numbers);
+  if (!figures) return null;
+  if (d.field === "insight") return `it cited ${figures} — not on the page`;
+  if (d.field === "evidence") return `the evidence behind it cites ${figures}, not in the page's data`;
+  return null;
+}
+
 /** The headline over the dropped findings — true of every drop it counts. */
 function droppedHeadline(n: number, reasons: readonly unknown[]): string {
   const head = `${n} ${plural(n, "finding", "findings")} dropped`;
@@ -710,13 +729,14 @@ export function reviewDropped(g: SeoReviewGrounding | null | undefined): {
   line: string;
   items: { insight: string; reason: string }[];
 } | null {
-  const dropped = rows<{ reason?: unknown; insight?: unknown }>(g?.dropped);
+  const dropped = rows<{ reason?: unknown; insight?: unknown; field?: unknown; numbers?: unknown }>(g?.dropped);
   if (!dropped.length) return null;
   return {
     line: droppedHeadline(dropped.length, dropped.map((d) => d.reason)),
     items: dropped.map((d) => ({
       insight: str(d.insight) ?? "A finding",
-      reason: (typeof d.reason === "string" && REVIEW_DROP_REASONS[d.reason]) || "it didn't pass the evidence check",
+      reason: inventedNumberReason(d)
+        ?? ((typeof d.reason === "string" && REVIEW_DROP_REASONS[d.reason]) || "it didn't pass the evidence check"),
     })),
   };
 }
@@ -867,8 +887,9 @@ export function morePagesLine(i: Pick<SeoAuditIssue, "count" | "pages">): string
 }
 
 /** The review's missing topics, each with its blog-plan position when it
- *  has one. Strings (every backend so far) read as before. */
-export function missingTopics(list: SeoSiteReview["missing_topics"] | null | undefined): { text: string; inPlan: number | null }[] {
+ *  has one: `missing_topics_detail` objects, or the plain `missing_topics`
+ *  strings of an older backend (read as before, no pointer). */
+export function missingTopics(list: readonly (string | SeoMissingTopic)[] | null | undefined): { text: string; inPlan: number | null }[] {
   if (!Array.isArray(list)) return [];
   return list.flatMap((item) => {
     if (typeof item === "string") return item.trim() ? [{ text: item, inPlan: null }] : [];
